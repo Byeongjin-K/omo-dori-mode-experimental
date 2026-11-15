@@ -69,7 +69,8 @@ export const USAGE_MIDDLE = `  challenge <key> --plan FILE [--model M] [--all]
                                        only pending and helped ones reach new briefs; a global one is the lead's to mark
   worklog add <title> --source REF     record an owner request when it arrives (upstream dori-superagent#96)
   worklog next|note <id> <text>        set the item's next step, or add a note (a decision, an owner)
-  worklog close <id> --result TEXT     close the item with what came of it
+  worklog close <id> --result TEXT     close the item with what came of it; a note or Next line that reads as a promise
+    [--ack-promise]                    (after, will, 뒤, 약속, ...) prints WORKLOG_CLOSE_PROMISE and refuses without --ack-promise
   worklog list [--open]                items as JSON; <stateDir>/worklog.md holds the same for reading, and the
                                        dori handover note lists the open ones
   close  <key> [--note TEXT] [--summary TEXT] [--posted ID|LINK] [--lesson TEXT [--evidence PATH]]...

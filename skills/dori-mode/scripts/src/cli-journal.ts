@@ -84,7 +84,7 @@ const worklogCommand: Command = async (context) => {
       console.log(JSON.stringify(worklog.note(id(), text(), now)));
       break;
     case "close":
-      console.log(JSON.stringify(worklog.close(id(), need("result"), now)));
+      console.log(JSON.stringify(worklog.close(id(), need("result"), now, { ackPromise: Boolean(flags.values["ack-promise"]) })));
       break;
     case "list": {
       const read = worklog.read();

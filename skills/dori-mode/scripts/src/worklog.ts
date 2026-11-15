@@ -2,6 +2,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
+import { promiseLines } from "./worklog-promise.ts";
 
 export type WorklogItem = {
   readonly id: string;
@@ -115,8 +116,10 @@ export class Worklog {
     return this.write({ op: "note", id, at: new Date(now).toISOString(), text: text.trim() });
   }
 
-  close(id: string, result: string, now: number): WorklogItem {
-    this.openItem(id);
+  // Fork change (worklog da078c1a): a note or Next line that reads as a promise (promiseLines) stops it, unless acknowledged.
+  close(id: string, result: string, now: number, opts: { readonly ackPromise?: boolean } = {}): WorklogItem {
+    const owed = promiseLines(this.openItem(id)).map((line) => `WORKLOG_CLOSE_PROMISE ${id} ${line}`);
+    if (owed.length && !opts.ackPromise) throw new WorklogError([...owed, `WORKLOG_CLOSE_REFUSED ${id}: the line above reads as a promise still owed; keep it or hand it on, then close again with --ack-promise`].join("\n"));
     return this.write({ op: "close", id, at: new Date(now).toISOString(), result: result.trim() });
   }
 
@@ -233,10 +236,14 @@ export const renderWorklog = (items: readonly WorklogItem[]): string => {
   return `${WORKLOG_MARKER}\n# Worklog\n\n${section("Open", open)}\n${section("Closed", closed)}`;
 };
 
+/** One open item as dori boot and a handover note show it. */
+export const openLine = (item: WorklogItem): string =>
+  `OPEN ${item.id} ${JSON.stringify(item.title)} source=${JSON.stringify(item.source)} next=${JSON.stringify(item.next ?? "")}`;
+
 export const worklogLines = (items: readonly WorklogItem[]): string[] => {
   const open = items.filter((item) => item.closedAt === undefined);
   return [
     `WORKLOG open=${open.length}`,
-    ...open.map((item) => `OPEN ${item.id} ${JSON.stringify(item.title)} source=${JSON.stringify(item.source)} next=${JSON.stringify(item.next ?? "")}`),
+    ...open.map(openLine),
   ];
 };

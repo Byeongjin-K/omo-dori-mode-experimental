@@ -817,12 +817,13 @@ test("the quotes in the old lead's conversation that its summary does not hold g
   expect(printed.find((l) => l.startsWith("HANDOVER_NOTE"))).toContain("1 quotes from the old conversation");
 });
 
-test("the open worklog items go into the note with their Next line, closed ones stay out, and a damaged line is named (upstream dori-superagent#96)", async () => {
-  // Given one open item with a next step, one closed item, and a line that is no record (line 9: each append starts with its own newline)
+test("the open worklog items go into the note with their Next and NOTE lines, closed ones stay out, and a damaged line is named (upstream dori-superagent#96)", async () => {
+  // Given one open item with a next step, one closed item, and a line that is no record (line 11: each append starts with its own newline)
   const deps = await setup();
   const log = new Worklog(state.dir);
   const open = log.add("Ship the release notes", "discord:777/m1", Date.parse("2026-10-11T16:00:00Z"));
   log.next(open.id, "wait for CI on #12, then merge", Date.parse("2026-10-11T16:01:00Z"));
+  log.note(open.id, "told gongdori: the wrist lane opens after #56 merges", Date.parse("2026-10-11T16:01:30Z"));
   const done = log.add("Rename the bot", "discord:777/m2", Date.parse("2026-10-11T16:02:00Z"));
   log.close(done.id, "renamed", Date.parse("2026-10-11T16:03:00Z"));
   writeFileSync(log.path, `${readFileSync(log.path, "utf8")}garbage\n`);
@@ -833,7 +834,7 @@ test("the open worklog items go into the note with their Next line, closed ones 
   // Then the new lead reads the open item and its Next line in the note, and the count is printed
   expect(r).toMatchObject({ code: 0, to: NEW });
   const note = readFileSync(r.note ?? "", "utf8");
-  expect(note).toContain(`## Open worklog items (1, dori worklog list --open; ${log.markdownPath})\n- OPEN ${open.id} "Ship the release notes" source="discord:777/m1" next="wait for CI on #12, then merge"\n- WORKLOG damaged ${log.path}:9: JSON Parse error`);
+  expect(note).toContain(`## Open worklog items (1, dori worklog list --open; ${log.markdownPath})\n- OPEN ${open.id} "Ship the release notes" source="discord:777/m1" next="wait for CI on #12, then merge"\n- NOTE ${open.id} 2026-10-11T16:01:30.000Z "told gongdori: the wrist lane opens after #56 merges"\n- WORKLOG damaged ${log.path}:11: JSON Parse error`);
   expect(note).not.toContain(done.id);
   expect(printed.find((l) => l.startsWith("HANDOVER_NOTE"))).toContain("1 open worklog items");
 });

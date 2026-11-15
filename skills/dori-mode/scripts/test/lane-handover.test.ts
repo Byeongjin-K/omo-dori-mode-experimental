@@ -11,6 +11,7 @@ import { ackHandover, manifestPath } from "../src/handover.ts";
 import { compactionStuckOn, type LaneFacts, laneHandover, type LaneHandoverDeps, type LaneHandoverOptions, markReady, missingFrom, pendingFile, readyFile, statusLine, trainingMark, waitingRequest } from "../src/lane-handover.ts";
 import { appendRollover, approvalProblem, AUTO_GRANT_MS, filledApproval, measuredSignal, mintAutoGrant, takeAutoGrant, compactionScan, holdTyped, inboxMessages, compactionsIn, crossed, ownerRolloverText, peerStuckLines, quietReason, readRollovers, rolloverCause, rolloverStats, sessionSignals } from "../src/rollover.ts";
 import { stuckTop, stuckView } from "../src/explore.ts";
+import { Worklog } from "../src/worklog.ts";
 import { recordFix } from "../src/same-fix.ts";
 import { QuestionStore } from "../src/messenger/discord-cards.ts";
 import type { Lane } from "../src/registry.ts";
@@ -223,16 +224,19 @@ test("the status line gives model, thinking and context use in both omo formats"
   expect(statusLine("❯ claude-opus-5-5 effort high in the input\n────\n 1K/1M (1%) gpt-6", MODEL)).toEqual({ contextPct: 1 });
 });
 
-test("the note carries brief, goal, Done, todos, monitors, local chains, detached jobs, reports and model; --dry-run opens nothing", async () => {
+test("the note carries brief, goal, Done, todos, open worklog items with their notes, monitors, local chains, detached jobs, reports and model; --dry-run opens nothing", async () => {
   // Given
   const deps = await setup();
   ready(deps, [15]);
+  const item = new Worklog(deps.config.stateDir).add("Wrist lane for gongdori", "discord:1/2", Date.parse("2026-10-11T16:00:00Z"));
+  new Worklog(deps.config.stateDir).note(item.id, "told gongdori: the wrist lane opens after #56 merges", Date.parse("2026-10-11T16:01:00Z"));
   // When
   const r = await laneHandover(deps, "demo", "aoe_lead_x", { dryRun: true });
   // Then
   expect(r.code).toBe(0);
   const note = readFileSync(r.note ?? "", "utf8");
   for (const part of [
+    `- OPEN ${item.id} "Wrist lane for gongdori" source="discord:1/2" next=""\n- NOTE ${item.id} 2026-10-11T16:01:00.000Z "told gongdori: the wrist lane opens after #56 merges"`,
     `Read your brief ${lane().brief} in full`,
     "- Done: merged o/r#1",
     '- Owner goal (owner words): "레인에도 적용"',
@@ -3072,3 +3076,4 @@ test("a run started again for a request the lead has since replaced leaves befor
   expect(rolloverRows()).toHaveLength(rows);
   expect(waitingRequest(readRollovers(state.dir), "demo", OLD)?.at).toBe(b);
 });
+
