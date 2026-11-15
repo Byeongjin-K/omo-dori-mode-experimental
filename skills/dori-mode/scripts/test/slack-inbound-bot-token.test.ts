@@ -96,8 +96,9 @@ for (const method of METHODS) {
           expect(error.status).toBe(failure === "http500" ? 500 : 200);
           expect(error.code).toBe(failure === "invalid_auth" ? "invalid_auth" : "");
         }
-        expect(attempts).toBe(failure === "http500" ? 5 : 1);
-        expect(waited).toEqual(failure === "http500" ? [1000, 2000, 4000, 8000] : []);
+        // a network failure gets the 5xx ladder before it is rethrown (upstream #230)
+        expect(attempts).toBe(failure === "invalid_auth" ? 1 : 5);
+        expect(waited).toEqual(failure === "invalid_auth" ? [] : [1000, 2000, 4000, 8000]);
         expect(warned).toEqual([]);
         const unseen = [{ channel: "C1", rootTs: "1.1", seenTs: "1.1" }, { channel: "C2", rootTs: "3.1", seenTs: "3.1" }];
         expect(await ledger.list()).toEqual(unseen);

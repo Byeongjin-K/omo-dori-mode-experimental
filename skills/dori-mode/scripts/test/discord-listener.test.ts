@@ -5,7 +5,7 @@ import { defaultDiscordWords } from "../src/config.ts";
 import { Discord } from "../src/messenger/discord.ts";
 import { QuestionCards, QuestionStore } from "../src/messenger/discord-cards.ts";
 import { audioAttachment, type DiscordMessage, DiscordListener, eyesOff, type GatewayConnection, type ListenerDeps, LISTENER_INTENTS, webhookVerdict } from "../src/messenger/discord-listener.ts";
-import type { Http, HttpRequest, HttpResponse } from "../src/messenger/http.ts";
+import { DEFAULT_RETRY, type Http, type HttpRequest, type HttpResponse } from "../src/messenger/http.ts";
 import { fakeClock, withState } from "./fakes.ts";
 
 const OWNER = "100000000000000001";
@@ -162,7 +162,7 @@ test("a failed history page keeps its cursor for the next reconnect", async () =
   await expect(listener.backfill()).rejects.toThrow("history unavailable");
   fail = false;
   await restart().backfill();
-  expect(calls().filter((c) => c === `GET /channels/${CHANNEL}/messages?after=1000&limit=100`)).toHaveLength(2);
+  expect(calls().filter((c) => c === `GET /channels/${CHANNEL}/messages?after=1000&limit=100`)).toHaveLength(DEFAULT_RETRY.attempts + 1);
   expect(inbox().map((r) => r.id)).toEqual(["1000", "1001"]);
 });
 
