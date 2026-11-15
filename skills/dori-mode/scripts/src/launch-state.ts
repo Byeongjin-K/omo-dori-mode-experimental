@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
-import { forwardEnv, laneEnv, listAoePanes } from "./aoe.ts";
+import { forwardEnv, laneEnv } from "./aoe.ts";
+import { listAoeSessions } from "./sessions.ts";
 import { isHerdrPane, paneRef } from "./herdr.ts";
 import { isHcPane } from "./hc-pane.ts";
 import type { FlowDeps } from "./done-flow.ts";
@@ -31,7 +32,7 @@ export const laneRepo = async (deps: Pick<FlowDeps, "run">, cwd: string): Promis
 // live agent sessions as tmux names it (never an aoe_term_ plain terminal). The pane's own address picks the listing
 // (hc:t<n> hc, <ws>:<pane> herdr, else tmux), whatever the backend, so a Dori moving between backends adopts both.
 const paneOwned = async (deps: FlowDeps, pane: string): Promise<{ readonly owned: boolean; readonly group: string }> => {
-  if (!isHcPane(pane) && !isHerdrPane(pane)) return { owned: (await listAoePanes(deps.run)).some((p) => p.pane_id === pane), group: "aoe live agent sessions" };
+  if (!isHcPane(pane) && !isHerdrPane(pane)) return { owned: (await listAoeSessions(deps.run)).some((s) => s.ref.id === pane), group: "aoe live agent sessions" };
   const ref = paneRef(pane);
   const group = deps.config.laneWorkspace || undefined;
   const filter = ref.runtime === "hc" ? { group: group ?? "dori" } : group ? { group } : undefined;

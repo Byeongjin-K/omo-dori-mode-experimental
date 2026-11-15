@@ -85,5 +85,9 @@ test("a failing session listing refuses the adopt with the listing's reason", as
   world.aoeListError = "aoe down";
   const deps = depsFor(world, fakeClock(T0), state.dir, { backend: "aoe" });
   await expect(adoptLane(deps, input("aoe_x_abcdef12"))).rejects.toThrow("cannot list");
+  delete world.aoeListError;
+  world.aoe = [{ id: "abcdef1234", title: "x", path: "/w", tool: "omo" }];
+  world.tmuxLsError = "no server running";
+  await expect(adoptLane(deps, input("aoe_x_abcdef12"))).rejects.toThrow("tmux ls failed: no server running");
   expect(await deps.registry.read("demo")).toBeNull();
 });
