@@ -8,7 +8,7 @@ import type { Http } from "../src/messenger/http.ts";
 import { statusOf } from "../src/registry.ts";
 import { run } from "../src/run.ts";
 import { checkDone, checkSignal, doneSyntaxErrors, splitDone, weakDone } from "../src/done-signals.ts";
-import { depsFor, fakeClock, newWorld, withState } from "./fakes.ts";
+import { depsFor, fakeClock, fakeRunner, newWorld, withState } from "./fakes.ts";
 
 const state = withState();
 afterAll(() => state.done());
@@ -76,21 +76,31 @@ test("signals are split on top-level semicolons only, so a semicolon inside an a
 });
 
 test("a Done line with a malformed signal is refused at launch, with the reason", async () => {
-  const deps = depsFor(newWorld(), fakeClock(0), state.dir);
+  // dori adopt reads the brief and checks the pane is one of dori's (upstream #230)
+  const world = newWorld();
+  world.panes.push({ pane_id: "w:p9", workspace_id: "w" });
+  const brief = join(state.dir, "qa-brief.md");
+  writeFileSync(brief, "# qa\n- Done = closed acme/app#3. The lane closes only when every signal reads back live.\n");
+  const deps = depsFor(world, fakeClock(0), state.dir);
   const bad = ["two clean QA passes", "command bun test", 'command ["bun", 3]', "file x.json sha256=abc", "url ftp://host", 'command ["x"] stdout="y"', "file a.json json:.v~1"];
   for (const done of bad) expect(doneSyntaxErrors(done)).toHaveLength(1);
-  await expect(adoptLane(deps, { key: "qa-lane", title: "qa", brief: "/b.md", done: "command bun test", pane: "w:p9" })).rejects.toBeInstanceOf(LaunchError);
-  const lane = await adoptLane(deps, { key: "qa-lane", title: "qa", brief: "/b.md", done: 'command ["bun","test"] stdout~"0 fail"; file ~/qa/report.json json:.passed=true; url http://localhost:3000/health', pane: "w:p9" });
+  await expect(adoptLane(deps, { key: "qa-lane", title: "qa", brief, done: "command bun test", pane: "w:p9" })).rejects.toBeInstanceOf(LaunchError);
+  const lane = await adoptLane(deps, { key: "qa-lane", title: "qa", brief, done: 'command ["bun","test"] stdout~"0 fail"; file ~/qa/report.json json:.passed=true; url http://localhost:3000/health', pane: "w:p9" });
   expect(lane.done).toContain("command");
 });
 
 test("a QA-only lane's claim is re-checked at close time: the lane says done, but the command still fails, so it stays open", async () => {
   const world = newWorld();
+  world.panes.push({ pane_id: "w:p3", workspace_id: "w" });
   const clock = fakeClock(Date.parse("2026-01-01T00:00:00Z"));
   const flag = join(state.dir, "qa-passed");
-  // real git runs here, so it gets the real file system too: the fake one says every path, a .git too, exists
-  const deps = { ...depsFor(world, clock, state.dir), run, exists: existsSync, signalIo: { cwd: state.dir } };
-  const lane = await adoptLane(deps, { key: "local-setup", title: "setup", brief: "/b.md", done: `command ["test","-f","${flag}"]`, pane: "w:p3", cwd: state.dir });
+  const setupBrief = join(state.dir, "setup-brief.md");
+  writeFileSync(setupBrief, '# setup\n- Done = command ["true"]. The lane closes only when every signal reads back live.\n');
+  // real git runs here, so it gets the real file system too: the fake one says every path, a .git too, exists; the adopt's
+  // pane check asks herdr, which the fake answers (never the live server)
+  const fakeRun = fakeRunner(world);
+  const deps = { ...depsFor(world, clock, state.dir), run: (argv: readonly string[], opts?: Parameters<typeof run>[1]) => (argv[0] === "herdr" ? fakeRun(argv, opts) : run(argv, opts)), exists: existsSync, signalIo: { cwd: state.dir } };
+  const lane = await adoptLane(deps, { key: "local-setup", title: "setup", brief: setupBrief, done: `command ["test","-f","${flag}"]`, pane: "w:p3", cwd: state.dir });
   await claimDone(deps, lane, "I ran the setup and it works");
   clock.at += 6 * 60_000;
   await watchTick(deps);

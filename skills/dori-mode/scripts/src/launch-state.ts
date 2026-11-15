@@ -1,9 +1,11 @@
 import { resolve } from "node:path";
-import { forwardEnv, laneEnv } from "./aoe.ts";
+import { forwardEnv, laneEnv, listAoePanes } from "./aoe.ts";
+import { isHerdrPane, paneRef } from "./herdr.ts";
+import { isHcPane } from "./hc-pane.ts";
 import type { FlowDeps } from "./done-flow.ts";
 import { sendVerified } from "./panes.ts";
 import { type Lane, threadRefProblem } from "./registry.ts";
-import { iso } from "./run.ts";
+import { iso, runtimesOf } from "./run.ts";
 import { checkDone, doneSyntaxErrors } from "./done-signals.ts";
 import { watchLog } from "./watch-log.ts";
 import { checkedLedger, type Ledger, repoName } from "./directives.ts";
@@ -24,8 +26,32 @@ export const laneRepo = async (deps: Pick<FlowDeps, "run">, cwd: string): Promis
   return repoName(r.code === 0 ? r.out : "", cwd);
 };
 
+// The pane is one dori owns: hc labels lanes dori.group=<laneWorkspace || "dori"> (create's own default); herdr puts them
+// in laneWorkspace, or where the lead runs when it is empty, so then any pane of the server; a tmux name is one of aoe's
+// live agent sessions as tmux names it (never an aoe_term_ plain terminal). The pane's own address picks the listing
+// (hc:t<n> hc, <ws>:<pane> herdr, else tmux), whatever the backend, so a Dori moving between backends adopts both.
+const paneOwned = async (deps: FlowDeps, pane: string): Promise<{ readonly owned: boolean; readonly group: string }> => {
+  if (!isHcPane(pane) && !isHerdrPane(pane)) return { owned: (await listAoePanes(deps.run)).some((p) => p.pane_id === pane), group: "aoe live agent sessions" };
+  const ref = paneRef(pane);
+  const group = deps.config.laneWorkspace || undefined;
+  const filter = ref.runtime === "hc" ? { group: group ?? "dori" } : group ? { group } : undefined;
+  const sessions = await runtimesOf(deps.run, deps.config).for(ref).list(filter);
+  return { owned: sessions.some((s) => s.ref.id === ref.id), group: ref.runtime === "hc" ? `hc dori.group=${filter?.group}` : filter ? `herdr workspace ${filter.group}` : "herdr panes" };
+};
+
+// An adopt takes over a session dori did not start, so it proves three things first (upstream #230,
+// https://github.com/sisyphuslabs/dori-superagent/pull/230): the brief is on disk, it carries the Done line the done
+// protocol reads, and the pane is dori's. A foreign pane, a swarm's or a person's, would otherwise get lane messages.
+// validateLaunch checks the rest, as for a launch.
 export const adoptLane = async (deps: FlowDeps, input: LaunchInput & { readonly pane: string }): Promise<Lane> => {
   await validateLaunch(deps, input);
+  const brief = Bun.file(resolve(input.brief));
+  if (!(await brief.exists())) throw new LaunchError(`brief not found: ${input.brief}`);
+  if (!(await brief.text()).split("\n").some((line) => /^\s*-?\s*Done\s*=/.test(line))) throw new LaunchError(`brief has no Done line: ${input.brief}`);
+  const { owned, group } = await paneOwned(deps, input.pane).catch((e: unknown) => {
+    throw new LaunchError(`cannot list sessions to check the pane ${input.pane}: ${e instanceof Error ? e.message : String(e)}`);
+  });
+  if (!owned) throw new LaunchError(`pane ${input.pane} is not one of dori's sessions (${group}); refusing to adopt a pane dori does not own`);
   const lane: Lane = { key: input.key, title: input.title, thread: input.thread ?? "none", pane: input.pane, brief: resolve(input.brief), done: input.done, cwd: input.cwd ?? deps.config.defaultCwd, ...(input.tags?.length ? { tags: input.tags } : {}), ...intentFields(input), openedAt: iso(deps.clock) };
   await deps.registry.write(lane);
   return lane;

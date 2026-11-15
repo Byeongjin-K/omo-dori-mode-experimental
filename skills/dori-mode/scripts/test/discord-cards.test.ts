@@ -16,8 +16,8 @@ const fakeDiscord = (route: (req: HttpRequest) => unknown = () => ({})) => {
   const seen: HttpRequest[] = [];
   const http: Http = async (req): Promise<HttpResponse> => {
     seen.push(req);
-    const body = req.url.includes("/interactions/") ? "" : JSON.stringify(route(req));
-    return { status: body ? 200 : 204, headers: {}, body };
+    const out = route(req) as { readonly wire?: HttpResponse } | undefined; // wire: a refusal as Discord answers it; a throw is a network failure
+    return out?.wire ?? { status: req.url.includes("/interactions/") || out === undefined ? 204 : 200, headers: {}, body: req.url.includes("/interactions/") ? "" : JSON.stringify(out) };
   };
   const calls = () => seen.map((r) => `${r.method} ${r.url.replace("https://discord.com/api/v10", "")}`);
   const json = (n: number) => JSON.parse(String(seen[n]?.body));
@@ -625,7 +625,7 @@ test("a card in a thread that archived itself is folded by opening the thread an
   const thread = { archived: false };
   const { cards, calls, json } = setup((req) => {
     if (req.method === "PATCH" && req.url.endsWith("/channels/300")) thread.archived = JSON.parse(String(req.body)).archived ?? thread.archived;
-    if (req.method === "PATCH" && req.url.includes("/messages/") && thread.archived) throw new Error('discord PATCH /channels/300/messages/900: 400 {"message": "Thread is archived", "code": 50083}');
+    if (req.method === "PATCH" && req.url.includes("/messages/") && thread.archived) return { wire: { status: 400, headers: {}, body: '{"message": "Thread is archived", "code": 50083}' } };
     if (req.method === "GET") return { name: "🔔 fix login", type: 11, thread_metadata: { archived: thread.archived } };
     return req.method === "POST" && req.url.endsWith("/messages") ? { id: "900" } : {};
   });

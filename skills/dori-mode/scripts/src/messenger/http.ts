@@ -64,7 +64,16 @@ export const withBackoff = async (http: Http, clock: Clock, req: HttpRequest, po
   };
   let last: HttpResponse | undefined;
   for (let attempt = 0; attempt < policy.attempts; attempt++) {
-    last = await http(req);
+    try {
+      last = await http(req);
+    } catch (e) {
+      // A network-level failure (timeout, reset, DNS) throws instead of answering with a status: it gets the same ladder,
+      // and the last attempt rethrows (upstream #230, https://github.com/sisyphuslabs/dori-superagent/pull/230). A request
+      // its caller aborted is not a blip and is never retried.
+      if (attempt === policy.attempts - 1 || req.signal?.aborted) throw e;
+      await sleep(Math.min(policy.maxMs, policy.baseMs * 2 ** attempt));
+      continue;
+    }
     if (last.status !== 429 && last.status < 500) return last;
     const header = Number(last.headers["retry-after"]);
     const fromBody = retryAfterFromBody?.(last.body);
