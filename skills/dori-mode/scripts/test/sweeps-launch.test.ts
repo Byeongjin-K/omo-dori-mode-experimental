@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { adoptLane, LaunchError } from "../src/launch.ts";
 import { resolveSession } from "../src/session-id.ts";
 import { depsFor, fakeClock, newWorld, withState, type World } from "./fakes.ts";
@@ -15,10 +17,13 @@ afterEach(() => state.done());
 
 test("adopting a lane refuses a Done line the watcher could never check", async () => {
   const deps = depsFor(world, fakeClock(T0), state.dir);
-  await expect(adoptLane(deps, { key: "x-lane", title: "x", brief: "/b.md", done: "two clean QA passes", pane: "w:p2" })).rejects.toBeInstanceOf(LaunchError);
-  const ok = await adoptLane(deps, { key: "x-lane", title: "x", brief: "/b.md", done: "closed acme/app#3", pane: "w:p2" });
+  const brief = join(state.dir, "brief.md");
+  writeFileSync(brief, "# task\n- Done = merged. The lane closes only when every signal reads back live.\n");
+  world.panes.push({ pane_id: "w:p2", workspace_id: "w" });
+  await expect(adoptLane(deps, { key: "x-lane", title: "x", brief, done: "two clean QA passes", pane: "w:p2" })).rejects.toBeInstanceOf(LaunchError);
+  const ok = await adoptLane(deps, { key: "x-lane", title: "x", brief, done: "closed acme/app#3", pane: "w:p2" });
   expect(ok.thread).toBe("none");
-  await expect(adoptLane(deps, { key: "x-lane", title: "x", brief: "/b.md", done: "closed acme/app#3", pane: "w:p2" })).rejects.toThrow("already registered");
+  await expect(adoptLane(deps, { key: "x-lane", title: "x", brief, done: "closed acme/app#3", pane: "w:p2" })).rejects.toThrow("already registered");
 });
 
 test("the session id is read from --session, then a child's environment, then the session file made at start", async () => {
