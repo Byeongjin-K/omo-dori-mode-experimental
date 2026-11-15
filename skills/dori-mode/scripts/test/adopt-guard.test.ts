@@ -64,11 +64,21 @@ test("on hc, adopt only takes a terminal labelled into the lane group: laneWorks
   expect(await plain.registry.read("fourth")).toBeNull();
 });
 
-test("on the aoe backend, adopt takes a live aoe session and refuses any other tmux name", async () => {
+test("a tmux name must be a live aoe agent session: a plain terminal with the same id suffix and a name tmux lacks are refused", async () => {
   world.aoe = [{ id: "abcdef1234", title: "x", path: "/w", tool: "omo" }];
+  world.tmux = ["aoe_x_abcdef12", "aoe_term_fix-a_abcdef12"];
   const deps = depsFor(world, fakeClock(T0), state.dir, { backend: "aoe" });
   expect((await adoptLane(deps, input("aoe_x_abcdef12"))).pane).toBe("aoe_x_abcdef12");
-  await expect(adoptLane(deps, input("aoe_term_someone", briefWithDone("b2.md"), "other"))).rejects.toThrow("does not own");
+  await expect(adoptLane(deps, input("aoe_term_fix-a_abcdef12", briefWithDone("b2.md"), "other"))).rejects.toThrow("does not own");
+  world.tmux = ["aoe_x_abcdef12"];
+  await expect(adoptLane(deps, input("aoe_y_abcdef12", briefWithDone("b3.md"), "third"))).rejects.toThrow("does not own");
+});
+
+test("the pane's own address picks the listing: on the aoe backend a herdr pane of laneWorkspace is adopted, one outside it refused", async () => {
+  world.panes.push({ pane_id: "w1:p2", workspace_id: "w1" }, { pane_id: "w9:p1", workspace_id: "w9" });
+  const deps = depsFor(world, fakeClock(T0), state.dir, { backend: "aoe", laneWorkspace: "w1" });
+  expect((await adoptLane(deps, input("w1:p2"))).pane).toBe("w1:p2");
+  await expect(adoptLane(deps, input("w9:p1", briefWithDone("b2.md"), "other"))).rejects.toThrow("does not own");
 });
 
 test("a failing session listing refuses the adopt with the listing's reason", async () => {

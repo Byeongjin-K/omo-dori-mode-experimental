@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
-import { aoeSessions, forwardEnv, laneEnv, sessionFor } from "./aoe.ts";
-import { paneRef } from "./herdr.ts";
+import { forwardEnv, laneEnv, listAoePanes } from "./aoe.ts";
+import { isHerdrPane, paneRef } from "./herdr.ts";
+import { isHcPane } from "./hc-pane.ts";
 import type { FlowDeps } from "./done-flow.ts";
 import { sendVerified } from "./panes.ts";
 import { type Lane, threadRefProblem } from "./registry.ts";
@@ -26,11 +27,12 @@ export const laneRepo = async (deps: Pick<FlowDeps, "run">, cwd: string): Promis
 };
 
 // The pane is one dori owns: hc labels lanes dori.group=<laneWorkspace || "dori"> (create's own default); herdr puts them
-// in laneWorkspace, or where the lead runs when it is empty, so then any pane of the server; the aoe backend's are its live
-// sessions. A pane names its runtime (hc:t<n> is hc), as everywhere in the fork.
+// in laneWorkspace, or where the lead runs when it is empty, so then any pane of the server; a tmux name is one of aoe's
+// live agent sessions as tmux names it (never an aoe_term_ plain terminal). The pane's own address picks the listing
+// (hc:t<n> hc, <ws>:<pane> herdr, else tmux), whatever the backend, so a Dori moving between backends adopts both.
 const paneOwned = async (deps: FlowDeps, pane: string): Promise<{ readonly owned: boolean; readonly group: string }> => {
+  if (!isHcPane(pane) && !isHerdrPane(pane)) return { owned: (await listAoePanes(deps.run)).some((p) => p.pane_id === pane), group: "aoe live agent sessions" };
   const ref = paneRef(pane);
-  if (deps.config.backend === "aoe" && ref.runtime !== "hc") return { owned: sessionFor(await aoeSessions(deps.run), pane) !== undefined, group: "aoe live sessions" };
   const group = deps.config.laneWorkspace || undefined;
   const filter = ref.runtime === "hc" ? { group: group ?? "dori" } : group ? { group } : undefined;
   const sessions = await runtimesOf(deps.run, deps.config).for(ref).list(filter);
