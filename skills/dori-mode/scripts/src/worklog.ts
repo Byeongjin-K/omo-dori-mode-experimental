@@ -84,13 +84,13 @@ export class Worklog {
   }
 
   // Fork change (worklog da078c1a): a note or Next line that reads as a promise (promiseLines) stops it, unless acknowledged.
-  // The record decides (fold): a close without ack is ignored when the item holds a promise at its place, so a promise
+  // The record decides (fold): a close with ack false is ignored when the item holds a promise at its place, so a promise
   // note another writer appends between this check and the append stops it too (review 1 of #483).
   close(id: string, result: string, now: number, opts: { readonly ackPromise?: boolean } = {}): WorklogItem {
     const refusal = (item: WorklogItem) => new WorklogError([...promiseLines(item).map((line) => `WORKLOG_CLOSE_PROMISE ${id} ${line}`), `WORKLOG_CLOSE_REFUSED ${id}: the line above reads as a promise still owed; keep it or hand it on, then close again with --ack-promise`].join("\n"));
     const item = this.openItem(id);
     if (!opts.ackPromise && promiseLines(item).length) throw refusal(item);
-    const closed = this.write({ op: "close", id, at: new Date(now).toISOString(), result: result.trim(), ...(opts.ackPromise ? { ack: true as const } : {}) });
+    const closed = this.write({ op: "close", id, at: new Date(now).toISOString(), result: result.trim(), ack: Boolean(opts.ackPromise) });
     if (closed.closedAt === undefined) throw refusal(closed);
     return closed;
   }
@@ -134,7 +134,7 @@ export class Worklog {
         }
         if (event.op === "next") items.set(event.id, { ...item, next: event.text });
         else if (event.op === "note") items.set(event.id, { ...item, notes: [...item.notes, { at: event.at, text: event.text }] });
-        else if (event.op === "close" && !event.ack && promiseLines(item).length) warnings.push(`${this.path}:${index + 1}: worklog item ${event.id} close without --ack-promise ignored: a note or its Next reads as a promise`);
+        else if (event.op === "close" && event.ack === false && promiseLines(item).length) warnings.push(`${this.path}:${index + 1}: worklog item ${event.id} close without --ack-promise ignored: a note or its Next reads as a promise`);
         else if (event.op === "close") items.set(event.id, { ...item, closedAt: event.at, result: event.result });
       } catch (error) {
         if (!(error instanceof WorklogError)) throw error;

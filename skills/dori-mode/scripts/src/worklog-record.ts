@@ -3,7 +3,7 @@ export type Event =
   | { readonly op: "add"; readonly id: string; readonly at: string; readonly title: string; readonly source: string }
   | { readonly op: "next"; readonly id: string; readonly at: string; readonly text: string }
   | { readonly op: "note"; readonly id: string; readonly at: string; readonly text: string }
-  | { readonly op: "close"; readonly id: string; readonly at: string; readonly result: string; readonly ack?: true };
+  | { readonly op: "close"; readonly id: string; readonly at: string; readonly result: string; readonly ack?: boolean };
 export class WorklogError extends Error {}
 
 const ID = /^[0-9a-f]{8}$/;
@@ -23,9 +23,9 @@ export const parseEvent = (value: unknown): Event => {
   // Fork change (review of orientpine#352): only the four ops themselves; an inherited name (toString, __proto__) is no op.
   const wanted = typeof record["op"] === "string" && Object.hasOwn(fields, record["op"]) ? fields[record["op"]] : undefined;
   if (!wanted) throw new WorklogError('worklog field "op" must be add, next, note or close');
-  // Fork change (#483): a close may carry ack: true, written by dori worklog close --ack-promise (worklog.ts close).
+  // Fork change (#483): a close dori writes now carries ack (true: --ack-promise); one written before has none (worklog.ts close).
   const unknown = Object.keys(record).find((name) => !["op", "id", "at", ...Object.keys(wanted), ...(record["op"] === "close" ? ["ack"] : [])].includes(name));
-  if ("ack" in record && record["ack"] !== true) throw new WorklogError('worklog field "ack" must be true');
+  if ("ack" in record && typeof record["ack"] !== "boolean") throw new WorklogError('worklog field "ack" must be true or false');
   if (unknown !== undefined) throw new WorklogError(`unknown worklog field "${unknown}"`);
   for (const [name, max] of Object.entries(wanted)) {
     if (!singleLine(record[name], max)) throw new WorklogError(`worklog field "${name}" must be one nonempty line of at most ${max} characters`);

@@ -204,3 +204,16 @@ test("a promise note another writer appends between close's check and its append
     expect(new Worklog(state.dir).close(item.id, "opened", T0 + 3, { ackPromise: true }).closedAt).toBe(new Date(T0 + 3).toISOString());
   } finally { state.done(); }
 });
+
+test("a close written before --ack-promise existed (no ack field) stays closed, promise words or not", () => {
+  // Given a record as earlier dori wrote it: an item with a promise note, closed by a record without ack.
+  const state = withState();
+  try {
+    const log = new Worklog(state.dir);
+    const item = log.add("Wrist lane for gongdori", "discord:1/7", T0);
+    log.note(item.id, "told gongdori: opens after #56 merges", T0 + 1);
+    writeFileSync(log.path, `${readFileSync(log.path, "utf8")}${JSON.stringify({ op: "close", id: item.id, at: new Date(T0 + 2).toISOString(), result: "closed by the old lead" })}\n`);
+    // Then it reads as closed, with no warning.
+    expect(log.read()).toMatchObject({ items: [{ id: item.id, closedAt: new Date(T0 + 2).toISOString() }], problems: [], warnings: [] });
+  } finally { state.done(); }
+});
