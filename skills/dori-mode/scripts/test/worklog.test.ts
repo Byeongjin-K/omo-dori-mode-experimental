@@ -189,3 +189,18 @@ test("a promise in Korean, or in the Next line, also stops close", () => {
     expect(log.open()).toEqual([]);
   } finally { state.done(); }
 });
+
+test("a promise note another writer appends between close's check and its append still stops the close (review 1 of #483)", () => {
+  // Given an item with no promise yet, and a lane that adds the promise right before this close appends.
+  const state = withState();
+  try {
+    const item = new Worklog(state.dir).add("Wrist lane for gongdori", "discord:1/6", T0);
+    const racing = new Worklog(state.dir, () => { new Worklog(state.dir).note(item.id, "told gongdori: opens after #56 merges", T0 + 1); });
+    // When closing without --ack-promise; then it is refused with the racing note, and the item stays open.
+    expect(() => racing.close(item.id, "done", T0 + 2)).toThrow(`WORKLOG_CLOSE_PROMISE ${item.id} note 2026-11-04T00:00:00.001Z "told gongdori: opens after #56 merges"`);
+    expect(new Worklog(state.dir).open().map((open) => open.id)).toEqual([item.id]);
+    expect(new Worklog(state.dir).read().warnings.join("\n")).toContain(`worklog item ${item.id} close without --ack-promise ignored`);
+    // When closing it with ackPromise; then it closes.
+    expect(new Worklog(state.dir).close(item.id, "opened", T0 + 3, { ackPromise: true }).closedAt).toBe(new Date(T0 + 3).toISOString());
+  } finally { state.done(); }
+});
