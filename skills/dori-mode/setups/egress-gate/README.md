@@ -130,8 +130,10 @@ An optional `owner_proof.kakao_relay` accepts an owner's KakaoTalk request hande
 Omit this object to keep the feature off. Set `bot_id` to that bot's user id, `owner_ids` to the owner's KakaoTalk
 user ids, `watcher_user` to the account running `kakao-watch.ts`, and `socket` to its abstract socket name
 (`dori-kakao-proof` by default). The example uses placeholders and must be filled locally.
-The relay must quote the owner's text verbatim and include 1 to 5 distinct `kakao:<chat_id>/<log_id>` references
-(for example a line `-# 카톡 근거 kakao:<chat_id>/<log_id>` for each message). Use the relay post's own
+The relay must be the owner's text verbatim and nothing else, plus one line `-# 카톡 근거 kakao:<chat_id>/<log_id>`
+for each of its 1 to 5 distinct cited messages; the watcher answers `quoted:true` only when the rest of the post equals
+those messages in order (quote marks, markdown escapes and whitespace aside), so the relaying bot's own words go in a
+separate post and are never part of the basis. Use the relay post's own
 `channel_id/message_id` as `X-Dori-Owner-Message`; the original owner-message and card-answer branches still run first.
 The relay must be that bot's post, never a webhook, at the requested coordinates in the owner's guild. Its posting
 time (from the message id) and every cited message must be within `owner_proof.max_age_hours` (24 by default).

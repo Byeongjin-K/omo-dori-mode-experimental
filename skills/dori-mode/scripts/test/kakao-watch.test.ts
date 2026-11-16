@@ -84,7 +84,7 @@ test("proofs use only messages received by this watcher, never owner rows append
     void Bun.connect({
       unix: `\0${name}`,
       socket: {
-        open(socket) { socket.write(`${JSON.stringify({ chat: "100", log, text: "> synthetic \\*request\\*" })}\n`); },
+        open(socket) { socket.write(`${JSON.stringify({ chat: "100", log, text: `> synthetic \\*request\\*\n-# 카톡 근거 kakao:100/${log}` })}\n`); },
         data(_socket, bytes) { data += bytes.toString(); },
         close() { try { resolve(JSON.parse(data)); } catch (error) { reject(error); } },
         error(_socket, error) { reject(error); },
@@ -105,7 +105,8 @@ test("proofs use only messages received by this watcher, never owner rows append
 });
 
 test.each([
-  ["owner quoted", "owner", "owner text", "quote: owner text", true],
+  ["owner quoted", "owner", "owner text", "> owner text", true],
+  ["relay words around the quote", "owner", "owner text", "quote: owner text", false],
   ["member", "member", "member text", "member text", true],
   ["forged", "owner", "owner text", "different instruction", false],
   ["markdown escaped", "owner", "*owner* _text_!", "> \\*owner\\* \\_text\\_\\!", true],
@@ -114,7 +115,7 @@ test.each([
 ] as const)("attestation: %s", (_label, kind, content, text, quoted) => {
   const sent_at = Math.floor(Date.now() / 1000);
   const rows = new Map([["100/6", { channel_id: "100", id: "6", author_id: "1", author_kind: kind, sent_at, content }]]);
-  const reply = handleKakaoProofRequest(JSON.stringify({ chat: "100", log: "6", text }), rows);
+  const reply = handleKakaoProofRequest(JSON.stringify({ chat: "100", log: "6", text: `${text}\n-# 카톡 근거 kakao:100/6` }), rows);
   expect(reply).toEqual({ found: true, chat: "100", log: "6", author_id: "1", author_kind: kind, sent_at, quoted });
   expect(reply).not.toHaveProperty("text");
   expect(reply).not.toHaveProperty("content");
