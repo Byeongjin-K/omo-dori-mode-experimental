@@ -17,6 +17,9 @@ const DAY = 86400;
 export const normalizeKakaoQuote = (text: string): string =>
   text.replace(/\\([\x21-\x2f\x3a-\x40\x5b-\x60\x7b-\x7e])/g, "$1").replace(/\s+/g, " ").trim();
 
+// One Discord quote level per line (`> ` or `>>> `), so a multiline owner message quoted line by line still matches.
+export const unquoteRelay = (text: string): string => text.replace(/^[ \t]*(?:>>>|>)[ \t]?/gm, "");
+
 export const lookupKakaoProof = (rows: ReadonlyMap<string, KakaoProofRow>, reference: string): KakaoProofRow | undefined => rows.get(reference);
 
 export function pruneKakaoProof(rows: Map<string, KakaoProofRow>, now: number): void {
@@ -49,7 +52,7 @@ export function handleKakaoProofRequest(raw: string, rows: ReadonlyMap<string, K
     const content = normalizeKakaoQuote(row.content);
     return { found: true, chat: request.chat, log: request.log, author_id: row.author_id,
       author_kind: row.author_kind, sent_at: row.sent_at,
-      quoted: content.length > 0 && normalizeKakaoQuote(request.text).includes(content) };
+      quoted: content.length > 0 && normalizeKakaoQuote(unquoteRelay(request.text)).includes(content) };
   } catch (error) {
     if (error instanceof SyntaxError) return { found: false, error: "bad-request" };
     throw error;
