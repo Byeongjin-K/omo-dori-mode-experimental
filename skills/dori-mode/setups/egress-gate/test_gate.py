@@ -519,6 +519,16 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         await self.service.poll_approvals()
         self.assertEqual(self.changes()[0]["owner_kakao"], facts)
 
+    async def test_kakao_relay_is_a_basis_but_opens_no_url_on_the_web_window(self):
+        # The bot writes the relay post around the attested quote, so no URL in it counts as owner-written.
+        relay = await self.kakao_attestor()
+        self.page("example.net", "/page", "page", content_type="text/plain")
+        relay["content"] = "> synthetic owner request https://example.net/page\n-# 카톡 근거 kakao:100/6"
+        status, body = await self.web("/fetch?url=" + quote("https://example.net/page", safe=""), origin="20/" + CARD)
+        self.assertEqual((status, json.loads(body)["error"]), (403, "url-without-source"))
+        self.assertFalse(self.web_seen)
+        self.assertEqual(len(self.kakao_requests), 1)  # the relay itself was verified as a basis first
+
     async def test_old_proof_is_refused(self):
         self.proof_time = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=25)).isoformat()
         self.assertEqual((await self.request())[0], 403)

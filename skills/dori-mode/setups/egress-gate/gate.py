@@ -3061,7 +3061,9 @@ class Gate:
             authorization = "Bot " + Path(self.config["owner_proof"]["token_file"]).read_text().strip()
             data = await self.discord_json(f"/channels/{channel}/messages/{message}", authorization)
             answered = await self.owner_card_answer(data, channel, message, authorization)
-            links = web_owner_links(answered["answer"] if answered else str(data.get("content") or ""))
+            # A KakaoTalk relay is a bot post: its quote is attested, but not every URL around it, so it opens none.
+            written = answered["answer"] if answered else str(data.get("content") or "") if self.owner_wrote(data, channel) else ""
+            links = web_owner_links(written)
         except (Refused, OSError, ValueError, KeyError, TypeError):
             raise Refused("owner-message-required") from None
         return self.remember(("owner-links", reference), frozenset(links))
