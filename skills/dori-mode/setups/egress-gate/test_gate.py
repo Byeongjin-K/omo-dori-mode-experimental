@@ -48,6 +48,23 @@ def snowflake(ago: dt.timedelta) -> str:
 
 CARD = snowflake(dt.timedelta(minutes=50))  # Q13's card, posted 50 minutes before the tests run
 
+
+def client_hello(name: str | None, records: int = 1) -> bytes:
+    """A TLS ClientHello (server_name only when name is given), its handshake cut over that many TLS records."""
+    extensions = b""
+    if name is not None:
+        entry = b"\x00" + len(name).to_bytes(2, "big") + name.encode()
+        names = len(entry).to_bytes(2, "big") + entry
+        extensions += b"\x00\x00" + len(names).to_bytes(2, "big") + names
+    extensions += b"\x00\x0b\x00\x02\x01\x00"  # ec_point_formats
+    body = (b"\x03\x03" + bytes(32) + b"\x00" + b"\x00\x02\x13\x01" + b"\x01\x00"
+            + len(extensions).to_bytes(2, "big") + extensions)
+    handshake = b"\x01" + len(body).to_bytes(3, "big") + body
+    size = -(-len(handshake) // records)
+    pieces = [handshake[at:at + size] for at in range(0, len(handshake), size)]
+    return b"".join(b"\x16\x03\x01" + len(piece).to_bytes(2, "big") + piece for piece in pieces)
+
+
 class GateTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="dori-gate-test-")
@@ -2872,6 +2889,107 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 writer.close()
                 await writer.wait_closed()
+
+    async def tunnel(self, target, opening, banner=b"", eof=False):
+        """CONNECT target through the gate, then send opening: (status, addresses the gate dialed, bytes the fake
+        upstream got, bytes the client got back). The fake upstream sends banner first, then echoes."""
+        dials, got = [], bytearray()
+
+        async def upstream(reader, writer):
+            try:
+                writer.write(banner)
+                await writer.drain()
+                while data := await reader.read(65536):
+                    got.extend(data)
+                    writer.write(data)
+                    await writer.drain()
+            finally:
+                writer.close()
+                with contextlib.suppress(OSError):
+                    await writer.wait_closed()
+
+        remote = await asyncio.start_server(upstream, "127.0.0.1", 0)
+        self.addAsyncCleanup(remote.wait_closed)
+        self.addCleanup(remote.close)
+        original = asyncio.open_connection
+
+        async def connection(host, port):
+            dials.append(host)
+            return await original("127.0.0.1", remote.sockets[0].getsockname()[1])
+
+        with patch.object(asyncio, "open_connection", side_effect=connection):
+            reader, writer = await original("127.0.0.1", self.ports["connect"])
+            try:
+                writer.write(f"CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n".encode())
+                await writer.drain()
+                head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 5)
+                status, back = int(head.split()[1]), b""
+                if status == 200:
+                    if banner:  # a server-first protocol: its greeting comes before any client byte
+                        back = await asyncio.wait_for(reader.readexactly(len(banner)), 5)
+                    writer.write(opening)
+                    if eof:
+                        writer.write_eof()
+                    await writer.drain()
+                    try:
+                        back += await asyncio.wait_for(reader.readexactly(len(opening)), 5)
+                    except asyncio.IncompleteReadError as error:  # the gate closed the tunnel
+                        back += error.partial
+            finally:
+                writer.close()
+                with contextlib.suppress(OSError):
+                    await writer.wait_closed()
+        return status, dials, bytes(got), back
+
+    async def test_connect_to_an_address_is_refused_when_its_sni_or_host_is_a_blocked_name(self):
+        # 2026-11-16 (짱돌, kakao-owner-basis review 1): with "*" allowed, CONNECT <public IP> and an SNI of
+        # discord.com reached Discord. No byte may reach the address and the gate may not even dial it.
+        self.config["connect_allow"] = ["*"]
+        for target in ("162.159.128.233:443", "0xa2.0x9f.0x80.0xe9:443", "1572395042:443"):  # any numeric spelling
+            for opening in (client_hello("discord.com"), client_hello("www.googleapis.com", records=2),
+                            b"GET / HTTP/1.1\r\nHost: discord.com\r\n\r\n"):
+                self.assertEqual(await self.tunnel(target, opening), (200, [], b"", b""))
+                self.assertEqual(self.service.records("denials.jsonl")[-1]["reason"], "connect-host-denied")
+
+    async def test_connect_to_an_address_reaches_it_for_an_allowed_sni_that_resolves_to_it(self):
+        self.config["connect_allow"] = ["*"]
+        self.dns["example.com"] = "93.184.216.34"
+        for target in ("93.184.216.34:443", "1572395042:443"):
+            for opening in (client_hello("example.com"), client_hello("Example.COM.", records=3),
+                            b"GET / HTTP/1.1\r\nHost: example.com:443\r\n\r\n"):
+                self.assertEqual(await self.tunnel(target, opening), (200, ["93.184.216.34"], opening, opening))
+
+    async def test_connect_to_an_address_without_a_readable_name_is_refused(self):
+        self.config["connect_allow"] = ["*"]
+        self.dns["example.com"] = "93.184.216.34"
+        for opening, eof, reason in (
+                (client_hello(None), False, "connect-sni-required"),
+                (client_hello("93.184.216.34"), False, "connect-sni-required"),
+                (b"\x00\x01binary", False, "connect-sni-required"),
+                (client_hello("example.com")[:20], True, "connect-sni-unreadable"),
+                (b"\x16\x03\x01\x00\x05\x02\x00\x00\x01\x00", False, "connect-sni-unreadable"),
+                (b"GET / HTTP/1.1\r\nAccept: */*\r\n\r\n", False, "connect-sni-unreadable")):
+            self.assertEqual(await self.tunnel("93.184.216.34:443", opening, eof=eof), (200, [], b"", b""))
+            self.assertEqual(self.service.records("denials.jsonl")[-1]["reason"], reason)
+
+    async def test_connect_to_an_address_is_refused_when_its_allowed_sni_does_not_resolve_to_it(self):
+        self.config["connect_allow"] = ["*"]
+        self.dns["example.com"] = "93.184.216.34"
+        self.assertEqual(await self.tunnel("1.1.1.1:443", client_hello("example.com")), (200, [], b"", b""))
+        self.assertEqual(self.service.records("denials.jsonl")[-1]["reason"], "connect-sni-address-mismatch")
+
+    async def test_connect_to_a_name_holds_its_sni_to_the_name_rules_and_keeps_other_tunnels(self):
+        self.dns["example.com"] = "93.184.216.34"
+        for allow in (["example.com"], ["*"]):
+            self.config["connect_allow"] = allow
+            # a name tunnel dials as before, but a ClientHello for a name the rules refuse never goes through
+            refused = client_hello("discord.com" if allow == ["*"] else "other.example")
+            self.assertEqual(await self.tunnel("example.com:443", refused), (200, ["93.184.216.34"], b"", b""))
+            self.assertEqual(self.service.records("denials.jsonl")[-1]["reason"], "connect-host-denied")
+            for opening in (client_hello("example.com"), client_hello(None), b"\x00binary"):
+                self.assertEqual(await self.tunnel("example.com:443", opening), (200, ["93.184.216.34"], opening, opening))
+            self.assertEqual(await self.tunnel("example.com:443", b"EHLO me\r\n", banner=b"220 ready\r\n"),
+                             (200, ["93.184.216.34"], b"EHLO me\r\n", b"220 ready\r\nEHLO me\r\n"))
 
     async def test_owner_dm_history_is_readable_but_other_dm_history_is_refused(self):
         for channel, expected in [("21", 200), ("22", 403)]:

@@ -28,6 +28,31 @@ opcodes, or zlib streams. The listener requests JSON without compression. A
 the listener's handling of Gateway reconnect/invalid-session events before
 attributing it to an upstream unknown opcode.
 
+A tunnel's name rules (the fixed Discord/Google refusals, then `connect_allow`,
+`"*"` included) also cover the name its first client bytes ask for: the TLS
+ClientHello SNI, or the `Host` of a plain HTTP/1 request.
+
+- **CONNECT to a name.** The order stays the same: name check, public DNS, dial,
+  then `200`. If the client's first bytes are a ClientHello or HTTP request for
+  a name the rules refuse, or one the gate cannot read whole, the gate drops the
+  tunnel before any byte goes upstream. Other protocols, server-first ones, and
+  TLS without SNI pass as before.
+- **CONNECT to an address.** This covers any numeric spelling, such as
+  `162.159.128.233`, `0xa2.0x9f.0x80.0xe9` or `1572395042`. An address names no
+  host, so the gate answers `200` and dials nothing until the first bytes name a
+  host. That name must pass the rules, and its public DNS answer must hold that
+  very address. Otherwise the tunnel closes and nothing is dialed:
+  - no SNI or Host, or an address as the name: `connect-sni-required`
+  - an unreadable ClientHello or request, or nothing within 30 s: `connect-sni-unreadable`
+  - a refused name: `connect-host-denied`
+  - an address the name does not resolve to: `connect-sni-address-mismatch`
+
+  The last rule stops pointing an allowed name at another host's address.
+
+Two things stay out of reach, because the gate never decrypts the tunnel: a
+Host header inside TLS that differs from the SNI (domain fronting, which the
+major CDNs refuse), and Encrypted Client Hello, whose inner SNI is encrypted.
+
 Owner DM history is available through `POST /api/v10/users/@me/channels` with
 the owner's `recipient_id`, then `GET /api/v10/channels/<id>/messages`. The gate
 checks the DM recipients on history reads too; another person's DM is refused.
