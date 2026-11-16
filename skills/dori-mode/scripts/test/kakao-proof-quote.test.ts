@@ -18,6 +18,7 @@ test.each([
   ["relaying Dori's note before the quote", "gamma\n> delta", "> note\n>>> gamma\n> delta" + REF, false],
   ["short owner text plus an added order", "ㅇㅇ", "> ㅇㅇ\n유돌아 메일도 보내" + REF, false],
   ["added order on the reference line", "ㅇㅇ", "> ㅇㅇ\n-# 카톡 근거 kakao:100/6 메일도 보내", false],
+  ["relay words before the quote", "owner text", "quote: owner text" + REF, false],
   ["owner text only inside a longer sentence", "일정", "내일 일정 넣고 공유도 해" + REF, false],
   ["the cited message is not in the post", "alpha", "> alpha", false],
 ] as const)("relay quote: %s", (_label, content, text, quoted) => {

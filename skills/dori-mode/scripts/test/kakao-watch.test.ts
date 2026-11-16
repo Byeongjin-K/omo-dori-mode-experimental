@@ -106,7 +106,6 @@ test("proofs use only messages received by this watcher, never owner rows append
 
 test.each([
   ["owner quoted", "owner", "owner text", "> owner text", true],
-  ["relay words around the quote", "owner", "owner text", "quote: owner text", false],
   ["member", "member", "member text", "member text", true],
   ["forged", "owner", "owner text", "different instruction", false],
   ["markdown escaped", "owner", "*owner* _text_!", "> \\*owner\\* \\_text\\_\\!", true],
