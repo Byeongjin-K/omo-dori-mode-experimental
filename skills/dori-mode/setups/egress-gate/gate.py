@@ -3292,7 +3292,7 @@ class Gate:
         for entry in self.config["connect_allow"]:
             name = entry if isinstance(entry, str) else entry["host"]
             ports = [443] if isinstance(entry, str) else entry.get("ports", [443])
-            if (host == name or name.startswith("*.") and host.endswith(name[1:]) and host != name[2:]) and port in ports:
+            if (name == "*" or host == name or name.startswith("*.") and host.endswith(name[1:]) and host != name[2:]) and port in ports:
                 permitted = True
         if not permitted:
             raise Refused("connect-host-denied")
