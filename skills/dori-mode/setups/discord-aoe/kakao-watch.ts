@@ -43,7 +43,7 @@ export type KakaoState = {
   lastSweep: number;
   lastDiscover: number;
 };
-type KMsg = { log_id: string; author_id: number | string | { low: number; high: number }; author_name?: string; message: string; sent_at: number };
+type KMsg = { log_id: string; author_id: number | string | { low: number; high: number }; author_name?: string; message: string | null; sent_at: number };
 type KChat = { chat_id: string; type?: string | number; display_name?: string; unread_count?: number };
 
 // Room types whose read mark the server does not move. A PlusChat is a KakaoTalk channel (the "카카오계정" room the
@@ -312,6 +312,8 @@ export async function kakaoTick(o: KakaoOptions, s: KakaoState, runner: Runner, 
       s.cursors[id] = m.log_id;
       const author = userId(m.author_id);
       if (author === o.self) continue;
+      // A photo or feed post has no text (message null): it is still one row, with empty content.
+      const text = m.message ?? "";
       const row = {
         ts: new Date(now()).toISOString(),
         id: m.log_id,
@@ -321,13 +323,14 @@ export async function kakaoTick(o: KakaoOptions, s: KakaoState, runner: Runner, 
         author_id: author,
         author_name: m.author_name ?? null,
         author_kind: o.owner.split(",").map((x) => x.trim()).includes(author) ? "owner" as const : "member" as const,
-        content: m.message,
+        content: text,
         sent_at: m.sent_at,
-        mentions_self: o.mention ? o.mention.test(m.message) : false,
+        mentions_self: o.mention ? o.mention.test(text) : false,
       };
       appendFileSync(o.inbox, `${JSON.stringify(row)}\n`);
-      rememberKakaoProof(s.proofRecords, row, now() / 1000);
-      log(`KAKAO_MSG ${name} ${m.log_id} ${m.author_name ?? author}: ${m.message.slice(0, 120).replace(/\n/g, " ")}`);
+      // A post without text cannot be the owner's instruction, so it never becomes a proof.
+      if (text.trim()) rememberKakaoProof(s.proofRecords, row, now() / 1000);
+      log(`KAKAO_MSG ${name} ${m.log_id} ${m.author_name ?? author}: ${text.trim() ? text.slice(0, 120).replace(/\n/g, " ") : "[no text]"}`);
     }
     save(o.cursors, s.cursors);
     const target = s.cursors[id] ?? "";
