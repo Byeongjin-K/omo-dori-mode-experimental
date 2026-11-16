@@ -17,8 +17,13 @@ const DAY = 86400;
 export const normalizeKakaoQuote = (text: string): string =>
   text.replace(/\\([\x21-\x2f\x3a-\x40\x5b-\x60\x7b-\x7e])/g, "$1").replace(/\s+/g, " ").trim();
 
-// One Discord quote level per line (`> ` or `>>> `), so a multiline owner message quoted line by line still matches.
-export const unquoteRelay = (text: string): string => text.replace(/^[ \t]*(?:>>>|>)[ \t]?/gm, "");
+// Discord quoting: `> ` quotes one line, `>>> ` quotes the rest of the post. Remove one `> ` per line before a `>>> `
+// and only the `>>> ` marker itself, so the owner's own `>` characters after it are kept.
+const unquoteLines = (text: string): string => text.replace(/^[ \t]*>[ \t]?/gm, "");
+export const unquoteRelay = (text: string): string => {
+  const block = /^[ \t]*>>>[ \t]?/m.exec(text);
+  return block ? unquoteLines(text.slice(0, block.index)) + text.slice(block.index + block[0].length) : unquoteLines(text);
+};
 
 export const lookupKakaoProof = (rows: ReadonlyMap<string, KakaoProofRow>, reference: string): KakaoProofRow | undefined => rows.get(reference);
 
