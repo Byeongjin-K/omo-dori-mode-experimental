@@ -13,6 +13,7 @@ import io
 import json
 import subprocess
 import os
+import pwd
 from pathlib import Path
 import re
 import socket
@@ -421,6 +422,102 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         status, _ = await self.request()
         self.assertEqual(status, 403)
         self.assertFalse(self.writes())
+
+    async def kakao_attestor(self):
+        """A real abstract peer with this process's UID; replies contain only synthetic message metadata."""
+        name = "dori-gate-test-" + os.urandom(12).hex()
+        self.kakao_reply = {}
+        self.kakao_requests = []
+        self.kakao_sent_at = time.time() - 60
+
+        async def attest(reader, writer):
+            try:
+                raw = await reader.readline()
+                if raw:
+                    request = json.loads(raw)
+                    self.kakao_requests.append(request)
+                    row = dict(found=True, chat=request["chat"], log=request["log"], author_id="42",
+                               author_kind="owner", sent_at=self.kakao_sent_at, quoted=True)
+                    row.update(self.kakao_reply)
+                    writer.write(gate.json_bytes(row) + b"\n")
+                    await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+        server = await asyncio.start_unix_server(attest, path="\0" + name)
+        self.addAsyncCleanup(server.wait_closed)
+        self.addCleanup(server.close)
+        self.config["owner_proof"]["kakao_relay"] = dict(
+            bot_id="7", owner_ids=["42"], watcher_user=pwd.getpwuid(os.getuid()).pw_name, socket=name)
+        relay = dict(id=CARD, channel_id="20", author={"id": "7", "bot": True},
+                     content="> synthetic owner request\n-# 카톡 근거 kakao:100/6")
+        self.card_answers[CARD] = relay
+        return relay
+
+    async def test_kakao_relay_records_verified_references_without_text_and_uses_oldest_age(self):
+        relay = await self.kakao_attestor()
+        relay["content"] += "\n-# 카톡 근거 kakao:100/7\n-# 카톡 근거 kakao:100/6"
+        self.kakao_sent_at = time.time() - 86400 + 90
+        status, _ = await self.request(origin="20/" + CARD)
+        self.assertEqual(status, 200)
+        row = self.changes()[0]
+        self.assertEqual(row["owner_message"], f"https://discord.com/channels/10/20/{CARD}")
+        self.assertEqual(row["owner_kakao"], {"kakao": [
+            {"chat": "100", "log": "6", "sent_at": self.kakao_sent_at},
+            {"chat": "100", "log": "7", "sent_at": self.kakao_sent_at}]})
+        self.assertEqual([r["log"] for r in self.kakao_requests], ["6", "7"])
+        remaining = self.service.cache[("proof", "20/" + CARD)][0] - time.monotonic()
+        self.assertTrue(0 < remaining <= 90)
+
+    async def test_kakao_relay_refuses_unverified_author_quote_time_peer_and_coordinates(self):
+        relay = await self.kakao_attestor()
+        settings = dict(self.config["owner_proof"]["kakao_relay"])
+        original = dict(relay)
+        other_user = next(user.pw_name for user in pwd.getpwall() if user.pw_uid != os.getuid())
+        for case, message, reply, config in [
+            ("other bot", {"author": {"id": "8", "bot": True}}, {}, settings),
+            ("not bot", {"author": {"id": "7", "bot": False}}, {}, settings),
+            ("webhook", {"webhook_id": "7"}, {}, settings),
+            ("member", {}, {"author_kind": "member"}, settings),
+            ("foreign author", {}, {"author_id": "43"}, settings),
+            ("forged quote", {}, {"quoted": False}, settings),
+            ("missing", {}, {"found": False}, settings),
+            ("old kakao", {}, {"sent_at": time.time() - 86401}, settings),
+            ("future kakao", {}, {"sent_at": time.time() + 60}, settings),
+            ("bad timestamp", {}, {"sent_at": "now"}, settings),
+            ("old relay", {"id": snowflake(dt.timedelta(hours=25))}, {}, settings),
+            ("no refs", {"content": "no citation"}, {}, settings),
+            ("six refs", {"content": " ".join(f"kakao:100/{i}" for i in range(6))}, {}, settings),
+            ("wrong echo", {}, {"log": "9"}, settings),
+            ("wrong coordinates", {"channel_id": "99"}, {}, settings),
+            ("peer mismatch", {}, {}, {**settings, "watcher_user": other_user}),
+            ("off", {}, {}, None),
+        ]:
+            with self.subTest(case=case):
+                relay.clear()
+                relay.update({**original, **message})
+                self.kakao_reply = reply
+                self.service.cache.clear()
+                if config is None:
+                    self.config["owner_proof"].pop("kakao_relay", None)
+                else:
+                    self.config["owner_proof"]["kakao_relay"] = config
+                identity = relay["id"]
+                self.card_answers[identity] = relay
+                status, body = await self.request(origin="20/" + identity)
+                self.assertEqual((status, json.loads(body)["error"]), (403, "owner-message-required"))
+                self.assertFalse(self.writes())
+
+    async def test_kakao_relay_still_parks_outbound_writes_and_keeps_refs_after_approval(self):
+        await self.kakao_attestor()
+        self.approval()
+        status, _ = await self.request(origin="20/" + CARD, data={"attendees": [{"email": "guest@example.net"}]})
+        self.assertEqual(status, 202)
+        entry = self.approve()
+        facts = entry["owner_kakao"]
+        self.service.kakao_facts.clear()  # a restart before the owner taps must not lose the reference record
+        await self.service.poll_approvals()
+        self.assertEqual(self.changes()[0]["owner_kakao"], facts)
 
     async def test_old_proof_is_refused(self):
         self.proof_time = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=25)).isoformat()

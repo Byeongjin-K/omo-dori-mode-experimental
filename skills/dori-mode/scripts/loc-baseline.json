@@ -32,7 +32,7 @@
   "test/heavy-spread.test.ts": 373,
   "test/herdr-backend.test.ts": 279,
   "test/herdr-revive.test.ts": 349,
-  "test/kakao-watch.test.ts": 457,
+  "test/kakao-watch.test.ts": 429,
   "test/lane-handover.test.ts": 3079,
   "test/lead.test.ts": 331,
   "test/merge-gate.test.ts": 384,

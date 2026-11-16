@@ -27,7 +27,13 @@
     "card_answer_words": ["button", "버튼"],
     "card_answers": true,
     "gateway_url": "wss://gateway.discord.gg/?v=10&encoding=json",
-    "tap_wait_seconds": 2.5
+    "tap_wait_seconds": 2.5,
+    "kakao_relay": {
+      "bot_id": "REPLACE_WITH_RELAY_BOT_ID",
+      "owner_ids": ["REPLACE_WITH_OWNER_KAKAO_ID"],
+      "watcher_user": "REPLACE_WITH_WATCHER_USER",
+      "socket": "dori-kakao-proof"
+    }
   },
   "owner_order": {
     "api_base": "http://127.0.0.1:8810",

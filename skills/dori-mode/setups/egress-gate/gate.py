@@ -18,6 +18,7 @@ import http.client
 import ipaddress
 import json
 import os
+import pwd
 from pathlib import Path
 import re
 import secrets
@@ -26,6 +27,7 @@ import shutil
 import signal
 import socket
 import ssl
+import struct
 import sys
 import time
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urljoin, urlsplit
@@ -993,6 +995,7 @@ class Gate:
         self.approval_task = None
         self.order_facts = {}
         self.todo_facts = {}
+        self.kakao_facts = {}
         self.web_tasks = {}
         self.search_rest_until = 0.0
         self.taps = {}  # interaction id -> who tapped which button on which message, from the gate's own gateway session
@@ -1376,6 +1379,64 @@ class Gate:
                 await asyncio.gather(heart, return_exceptions=True)
             writer.close()
 
+    async def owner_kakao_relay(self, data: dict, reference: tuple[str, str]) -> tuple[float, list] | None:
+        """Verify every citation with the watcher's process-local record over a UID-authenticated abstract socket."""
+        settings = self.config["owner_proof"].get("kakao_relay")
+        if not isinstance(settings, dict):
+            return None
+        channel, message = reference
+        author = data.get("author")
+        if (str(data.get("id")) != message or str(data.get("channel_id")) != channel or data.get("webhook_id")
+                or not isinstance(author, dict) or author.get("bot") is not True
+                or not settings.get("bot_id") or str(author.get("id")) != str(settings["bot_id"])):
+            return None
+        text = data.get("content")
+        owners = settings.get("owner_ids")
+        name = settings.get("socket")
+        if (not isinstance(text, str) or not isinstance(owners, list) or not owners
+                or not all(isinstance(owner, str) and owner for owner in owners)
+                or not isinstance(name, str) or not name or name == "off" or "\0" in name):
+            return None
+        refs = list(dict.fromkeys(re.findall(r"kakao:([0-9]{1,20})/([0-9]{1,20})", text)))
+        if not 1 <= len(refs) <= 5:
+            return None
+        now = time.time()
+        maximum = self.config["owner_proof"].get("max_age_hours", 24) * 3600
+        oldest = ((int(message) >> 22) + DISCORD_EPOCH_MS) / 1000
+        if not 0 <= now - oldest <= maximum:
+            return None
+        facts = []
+        try:
+            expected_uid = pwd.getpwnam(settings["watcher_user"]).pw_uid
+            async with asyncio.timeout(3):
+                for chat, log in refs:
+                    reader, writer = await asyncio.open_unix_connection("\0" + name, limit=16384)
+                    try:
+                        peer = writer.get_extra_info("socket")
+                        _, uid, _ = struct.unpack("3i", peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+                        if uid != expected_uid:
+                            return None
+                        writer.write(json_bytes(dict(chat=chat, log=log, text=text)) + b"\n")
+                        await writer.drain()
+                        raw = await reader.readline()
+                        if not raw.endswith(b"\n") or len(raw) > 16384:
+                            return None
+                        row = strict_json(raw)
+                        if (not isinstance(row, dict) or row.get("found") is not True or row.get("chat") != chat
+                                or row.get("log") != log or row.get("author_kind") != "owner"
+                                or str(row.get("author_id")) not in owners or row.get("quoted") is not True
+                                or type(row.get("sent_at")) not in (int, float)
+                                or not 0 <= now - row["sent_at"] <= maximum):
+                            return None
+                        facts.append(dict(chat=chat, log=log, sent_at=row["sent_at"]))
+                        oldest = min(oldest, row["sent_at"])
+                    finally:
+                        writer.close()
+                        await writer.wait_closed()
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, TimeoutError):
+            return None
+        return oldest, facts
+
     async def proof(self, headers: dict) -> str:
         if not headers.get("x-dori-owner-message") and headers.get("x-dori-owner-order"):
             return await self.order_proof(headers)
@@ -1388,6 +1449,7 @@ class Gate:
         if cached is not None:
             return cached
         channel, message = reference.split("/")
+        kakao = None
         try:
             authorization = "Bot " + Path(self.config["owner_proof"]["token_file"]).read_text().strip()
             if not await self.channel_allowed(channel, authorization, dm=False):
@@ -1401,7 +1463,10 @@ class Gate:
                 stamp = dt.datetime.fromtimestamp(((int(message) >> 22) + DISCORD_EPOCH_MS) / 1000,
                                                   dt.timezone.utc).isoformat()
             else:
-                raise Refused("owner-message-required")
+                kakao = await self.owner_kakao_relay(data, (channel, message))
+                if kakao is None:
+                    raise Refused("owner-message-required")
+                stamp = dt.datetime.fromtimestamp(kakao[0], dt.timezone.utc).isoformat()
             stamp = dt.datetime.fromisoformat(stamp.replace("Z", "+00:00"))
             age = (dt.datetime.now(dt.timezone.utc) - stamp).total_seconds()
             maximum = self.config["owner_proof"].get("max_age_hours", 24) * 3600
@@ -1410,6 +1475,8 @@ class Gate:
         except (Refused, OSError, ValueError, KeyError, TypeError):
             raise Refused("owner-message-required") from None
         link = f"https://discord.com/channels/{self.config['owner_guild']}/{reference}"
+        if kakao is not None:
+            self.kakao_facts[link] = dict(kakao=kakao[1])
         # The cache must not extend the original message's age allowance.
         self.cache[("proof", reference)] = (time.monotonic() + min(600, maximum - age), link)
         return link
@@ -1769,6 +1836,8 @@ class Gate:
             row["owner_order"] = self.order_facts[proof]
         if proof in self.todo_facts:
             row["owner_todo"] = self.todo_facts[proof]
+        if proof in self.kakao_facts:
+            row["owner_kakao"] = self.kakao_facts[proof]
         if approved_by:
             row["approved_by"] = approved_by
         if batch:
@@ -1789,6 +1858,8 @@ class Gate:
             proof = batch["owner_message"]
             if batch.get("owner_todo"):
                 self.todo_facts[proof] = batch["owner_todo"]
+            if batch.get("owner_kakao"):
+                self.kakao_facts[proof] = batch["owner_kakao"]
         link = proof if proof is not None else await self.proof(headers)
         reasons = []
         api, op, snapshot = await self.policy(method, path, query, headers, body, reasons)
@@ -2074,7 +2145,7 @@ class Gate:
             message = str(json_object(response)["id"])
             link = f"https://discord.com/channels/{self.config['owner_guild']}/{thread}/{message}"
             batch = dict(id=identity, ts=utc(), uid=uid, owner_message=proof, owner_order=self.order_facts.get(proof),
-                         owner_todo=self.todo_facts.get(proof),
+                         owner_todo=self.todo_facts.get(proof), owner_kakao=self.kakao_facts.get(proof),
                          title=title, items=items, state=["open"] * len(items), refs={}, channel=thread,
                          message=message, card=link, thread=thread, status="pending",
                          content_hash=hashlib.sha256(json_object(response).get("content", content).encode()).hexdigest(),
@@ -2159,6 +2230,8 @@ class Gate:
                     self.order_facts[entry["owner_message"]] = entry["owner_order"]
                 if entry.get("owner_todo"):
                     self.todo_facts[entry["owner_message"]] = entry["owner_todo"]
+                if entry.get("owner_kakao"):
+                    self.kakao_facts[entry["owner_message"]] = entry["owner_kakao"]
                 try:
                     status, _, _ = await self.google_write(
                         entry["uid"], entry["method"], entry["path"], [tuple(pair) for pair in entry["query"]],
@@ -2275,6 +2348,7 @@ class Gate:
                          headers={k: v for k, v in headers.items() if k.lower() in {"content-type", "accept"}},
                          body=base64.b64encode(body).decode(), owner_message=proof,
                          owner_order=self.order_facts.get(proof), owner_todo=self.todo_facts.get(proof),
+                         owner_kakao=self.kakao_facts.get(proof),
                          reason=",".join(sorted(set(reasons))), api=api, op=op,
                          channel=channel, message=message, card=link, title=title, thread=thread,
                          content_hash=hashlib.sha256(json_object(response).get("content", content).encode()).hexdigest(), status="pending",
@@ -2439,6 +2513,8 @@ class Gate:
                         self.order_facts[entry["owner_message"]] = entry["owner_order"]
                     if entry.get("owner_todo"):
                         self.todo_facts[entry["owner_message"]] = entry["owner_todo"]
+                    if entry.get("owner_kakao"):
+                        self.kakao_facts[entry["owner_message"]] = entry["owner_kakao"]
                     try:
                         async with self.write_lock:
                             if entry["api"] == "obsidian":

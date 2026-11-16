@@ -7,6 +7,8 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { envFilePath, loadEnvFile, resolveInstance } from "../../scripts/src/config.ts";
 import { run, type Ran, type Runner } from "../../scripts/src/run.ts";
+import { pruneKakaoProof, rememberKakaoProof, startKakaoProofSocket, type KakaoProofRow } from "./kakao-proof.ts";
+export { handleKakaoProofRequest, lookupKakaoProof, normalizeKakaoQuote, startKakaoProofSocket } from "./kakao-proof.ts";
 
 export type KakaoOptions = {
   readonly self: string;
@@ -29,6 +31,7 @@ export type KakaoOptions = {
 // failed MARKREAD_TRIES times; that room is not marked again until a newer message moves its cursor. confirmed: the
 // log id this run saw the server's read mark reach; a sweep leaves that room alone until a newer message.
 export type KakaoState = {
+  proofRecords: Map<string, KakaoProofRow>;
   rooms: Record<string, { id: string; type?: string }>;
   cursors: Record<string, string>;
   marked: Record<string, string>;
@@ -97,6 +100,7 @@ const save = (path: string, value: unknown) => writeFileSync(path, `${JSON.strin
 export const loadKakaoState = (o: KakaoOptions): KakaoState => {
   const rooms = readJson<Record<string, { id: string; type?: string }>>(o.rooms, {});
   return {
+    proofRecords: new Map(),
     rooms,
     cursors: readJson(o.cursors, {}),
     marked: readJson(o.marked, {}),
@@ -234,6 +238,7 @@ const noteType = (o: KakaoOptions, s: KakaoState, name: string, type: string, lo
 };
 
 export async function kakaoTick(o: KakaoOptions, s: KakaoState, runner: Runner, now: () => number, log: (line: string) => void): Promise<void> {
+  pruneKakaoProof(s.proofRecords, now() / 1000);
   // Every call holds the account's lock: two agent-messenger logins on one device evict each other.
   const kakao = (args: string[], timeoutMs: number) => runner(["flock", o.lock, o.cli, "kakaotalk", ...args], { timeoutMs });
 
@@ -315,12 +320,13 @@ export async function kakaoTick(o: KakaoOptions, s: KakaoState, runner: Runner, 
         room: name,
         author_id: author,
         author_name: m.author_name ?? null,
-        author_kind: o.owner.split(",").map((x) => x.trim()).includes(author) ? "owner" : "member",
+        author_kind: o.owner.split(",").map((x) => x.trim()).includes(author) ? "owner" as const : "member" as const,
         content: m.message,
         sent_at: m.sent_at,
         mentions_self: o.mention ? o.mention.test(m.message) : false,
       };
       appendFileSync(o.inbox, `${JSON.stringify(row)}\n`);
+      rememberKakaoProof(s.proofRecords, row, now() / 1000);
       log(`KAKAO_MSG ${name} ${m.log_id} ${m.author_name ?? author}: ${m.message.slice(0, 120).replace(/\n/g, " ")}`);
     }
     save(o.cursors, s.cursors);
@@ -391,6 +397,7 @@ if (import.meta.main) {
     await tick();
     console.log("KAKAO_WATCH_ONCE");
   } else {
+    startKakaoProofSocket(process.env["DORI_KAKAO_PROOF_SOCKET"] || "dori-kakao-proof", state.proofRecords, console.log);
     console.log("KAKAO_WATCH_READY");
     for (;;) {
       await tick().catch((e: unknown) => log(`KAKAO_WATCH_FAIL ${e instanceof Error ? e.message : String(e)}`));
