@@ -63,6 +63,14 @@ test("the env file fills its values, skips comments and strips quotes; an inheri
   await loadEnvFile(join(state.dir, "missing.env"), env);
 });
 
+test("an env file with Windows CRLF line ends fills its values like an LF one", async () => {
+  const file = join(state.dir, "crlf.env");
+  writeFileSync(file, "# Discord\r\nDORI_DISCORD_TOKEN=from-file\r\nDORI_DISCORD_CHANNEL='222'\r\n");
+  const env: Record<string, string | undefined> = {};
+  await loadEnvFile(file, env);
+  expect(env).toEqual({ DORI_DISCORD_TOKEN: "from-file", DORI_DISCORD_CHANNEL: "222" });
+});
+
 test("a researchText that does not start with 'ulw research ' or lacks {question} is refused, and dori says why", async () => {
   expect(defaultConfig().explore.researchText).toStartWith("ulw research {question} ");
   const path = join(state.dir, "research.json");

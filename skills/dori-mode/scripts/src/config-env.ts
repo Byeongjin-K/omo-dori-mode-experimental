@@ -41,7 +41,9 @@ export const loadEnvFile = async (path: string, env: Record<string, string | und
 // A dori.env's KEY=VALUE lines: the first value of each name, its quotes taken off.
 export const envFileEntries = (text: string): Map<string, string> => {
   const values = new Map<string, string>();
-  for (const line of text.split("\n")) {
+  // a file saved on Windows (Notepad, a Python writer in text mode) ends its lines in CRLF; `.` stops before \r, so a CRLF
+  // line matched nothing and the listener said DORI_DISCORD_TOKEN is not set
+  for (const line of text.split(/\r?\n/)) {
     const [, name, value] = /^\s*([A-Z][A-Z0-9_]*)=(.*)$/.exec(line) ?? [];
     if (name && value !== undefined && !values.has(name)) values.set(name, value.trim().replace(/^(["'])(.*)\1$/, "$2"));
   }
