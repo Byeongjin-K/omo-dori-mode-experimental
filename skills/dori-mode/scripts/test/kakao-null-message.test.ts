@@ -40,6 +40,6 @@ test("a message without text is taken in once, moves the cursor past it and neve
   expect(lines.filter((l) => l.startsWith("KAKAO_MSG"))).toEqual(["KAKAO_MSG R 6 u1: [no text]", "KAKAO_MSG R 7 u1: dori after the photo"]);
   expect(lines.filter((l) => l.startsWith("KAKAO_WATCH_FAIL"))).toEqual([]);
   expect(handleKakaoProofRequest(JSON.stringify({ chat: "100", log: "6", text: "anything" }), state.proofRecords)).toEqual({ found: false });
-  expect(handleKakaoProofRequest(JSON.stringify({ chat: "100", log: "7", text: "dori after the photo" }), state.proofRecords))
+  expect(handleKakaoProofRequest(JSON.stringify({ chat: "100", log: "7", text: "dori after the photo\n-# 카톡 근거 kakao:100/7" }), state.proofRecords))
     .toMatchObject({ found: true, author_kind: "owner", quoted: true });
 });

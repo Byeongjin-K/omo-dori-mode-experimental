@@ -25,6 +25,25 @@ export const unquoteRelay = (text: string): string => {
   return block ? unquoteLines(text.slice(0, block.index)) + text.slice(block.index + block[0].length) : unquoteLines(text);
 };
 
+const REFERENCE = /kakao:([0-9]{1,20})\/([0-9]{1,20})/g;
+const REFERENCE_LINE = /^[ \t]*-#[ \t]*카톡 근거[ \t]+kakao:[0-9]{1,20}\/[0-9]{1,20}\s*$/;
+
+// A relay attests only when, apart from its `-# 카톡 근거 kakao:<chat>/<log>` lines, it is exactly the cited messages in
+// the order cited: a short owner message with words of the relaying Dori added around it must not pass.
+export function relayIsOwnerText(text: string, reference: string, rows: ReadonlyMap<string, KakaoProofRow>): boolean {
+  const cited = [...new Set([...text.matchAll(REFERENCE)].map((match) => `${match[1]}/${match[2]}`))];
+  if (!cited.includes(reference)) return false;
+  const contents: string[] = [];
+  for (const key of cited) {
+    const row = rows.get(key);
+    if (!row) return false;
+    contents.push(row.content);
+  }
+  const owner = normalizeKakaoQuote(contents.join("\n"));
+  const body = text.split("\n").filter((line) => !REFERENCE_LINE.test(line)).join("\n");
+  return owner.length > 0 && normalizeKakaoQuote(unquoteRelay(body)) === owner;
+}
+
 export const lookupKakaoProof = (rows: ReadonlyMap<string, KakaoProofRow>, reference: string): KakaoProofRow | undefined => rows.get(reference);
 
 export function pruneKakaoProof(rows: Map<string, KakaoProofRow>, now: number): void {
@@ -54,10 +73,9 @@ export function handleKakaoProofRequest(raw: string, rows: ReadonlyMap<string, K
     }
     const row = lookupKakaoProof(rows, `${request.chat}/${request.log}`);
     if (!row) return { found: false };
-    const content = normalizeKakaoQuote(row.content);
     return { found: true, chat: request.chat, log: request.log, author_id: row.author_id,
       author_kind: row.author_kind, sent_at: row.sent_at,
-      quoted: content.length > 0 && normalizeKakaoQuote(unquoteRelay(request.text)).includes(content) };
+      quoted: relayIsOwnerText(request.text, `${request.chat}/${request.log}`, rows) };
   } catch (error) {
     if (error instanceof SyntaxError) return { found: false, error: "bad-request" };
     throw error;
