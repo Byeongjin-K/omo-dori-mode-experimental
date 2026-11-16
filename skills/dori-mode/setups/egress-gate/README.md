@@ -75,10 +75,10 @@ failed citation refuse with `owner-message-required`. The oldest relay/citation 
 The basis link is the relay's Discord link; change records keep `owner_kakao: {"kakao":[{"chat","log","sent_at"}]}`,
 including after an approval card, with no KakaoTalk text. Outbound mail, outside invites and shares still require cards.
 A relay is a basis for writes only: the web window takes no URL from it (the bot writes the post around the quote).
-Known limit, accepted by the owner for now (Q555, 2026-11-16: watcher records now, a separate account later): the
-UID check proves the peer is `watcher_user`, not that it is the real watcher. If the relay Dori's agent runs under that
-account, it can stop the watcher and serve its own answers. Closing this needs the KakaoTalk watcher, its login and
-its code under an account the agent cannot use.
+The UID check proves the peer is `watcher_user`, not that it is the real watcher, so the watcher, its KakaoTalk login
+and its code must live under an account the relay Dori's agent cannot use (`../discord-aoe/kakao-system/`). Set
+`relay_user` to the relay Dori's own account: when it is missing, unknown or the same account as `watcher_user`, the
+feature is off, because that agent could stop the watcher and answer in its place.
 
 The receipt comes from the gate's own Discord gateway session with the proof token (`owner_proof.gateway_url`, default
 `wss://gateway.discord.gg/?v=10&encoding=json`; Discord sends every session of a bot the same events), which records

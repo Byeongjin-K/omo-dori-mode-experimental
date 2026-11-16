@@ -1408,6 +1408,9 @@ class Gate:
         facts = []
         try:
             expected_uid = pwd.getpwnam(settings["watcher_user"]).pw_uid
+            # The relay Dori's agent must not be able to replace the watcher: same account means the feature is off.
+            if expected_uid == pwd.getpwnam(settings["relay_user"]).pw_uid:
+                return None
             async with asyncio.timeout(3):
                 for chat, log in refs:
                     reader, writer = await asyncio.open_unix_connection("\0" + name, limit=16384)

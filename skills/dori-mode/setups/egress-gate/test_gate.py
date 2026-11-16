@@ -447,8 +447,9 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         server = await asyncio.start_unix_server(attest, path="\0" + name)
         self.addAsyncCleanup(server.wait_closed)
         self.addCleanup(server.close)
+        relay_user = next(user.pw_name for user in pwd.getpwall() if user.pw_uid != os.getuid())
         self.config["owner_proof"]["kakao_relay"] = dict(
-            bot_id="7", owner_ids=["42"], watcher_user=pwd.getpwuid(os.getuid()).pw_name, socket=name)
+            bot_id="7", owner_ids=["42"], watcher_user=pwd.getpwuid(os.getuid()).pw_name, relay_user=relay_user, socket=name)
         relay = dict(id=CARD, channel_id="20", author={"id": "7", "bot": True},
                      content="> synthetic owner request\n-# 카톡 근거 kakao:100/6")
         self.card_answers[CARD] = relay
@@ -491,6 +492,12 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
             ("wrong echo", {}, {"log": "9"}, settings),
             ("wrong coordinates", {"channel_id": "99"}, {}, settings),
             ("peer mismatch", {}, {}, {**settings, "watcher_user": other_user}),
+            # The socket is served by the relay Dori's own account while the watcher runs elsewhere.
+            ("agent-owned replacement", {}, {}, {**settings, "watcher_user": other_user,
+                                                  "relay_user": pwd.getpwuid(os.getuid()).pw_name}),
+            # Watcher and relay Dori share one account, so the agent could replace the watcher: off.
+            ("same account", {}, {}, {**settings, "relay_user": settings["watcher_user"]}),
+            ("no relay user", {}, {}, {k: v for k, v in settings.items() if k != "relay_user"}),
             ("off", {}, {}, None),
         ]:
             with self.subTest(case=case):

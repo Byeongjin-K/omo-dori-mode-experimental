@@ -31,7 +31,8 @@
     "kakao_relay": {
       "bot_id": "REPLACE_WITH_RELAY_BOT_ID",
       "owner_ids": ["REPLACE_WITH_OWNER_KAKAO_ID"],
-      "watcher_user": "REPLACE_WITH_WATCHER_USER",
+      "watcher_user": "dori-kakao",
+      "relay_user": "REPLACE_WITH_RELAY_DORI_USER",
       "socket": "dori-kakao-proof"
     }
   },

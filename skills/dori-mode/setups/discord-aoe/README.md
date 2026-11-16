@@ -330,6 +330,31 @@ or past that message, which is what the sender's "1" counts.
 A monitor keeps running the code it started with: after an update that changes `kakao-watch.ts`, stop the running watcher
 and arm the monitor again once (`pgrep -f kakao-watch.ts` shows exactly one).
 
+#### KakaoTalk under its own account
+
+When another Dori may act on the owner's KakaoTalk requests through the gate (`../egress-gate/README.md`,
+`owner_proof.kakao_relay`), the watcher, its login and its code must be out of the relay Dori's reach: a watcher in the
+Dori's own session can be stopped and replaced by its agent. `kakao-system/` runs it as the system account `dori-kakao`:
+
+| Piece | Where | Who can change it |
+|---|---|---|
+| node, agent-messenger, bun and this skill's code | `/opt/dori-kakao` | root |
+| Login (`~/.config/agent-messenger`), rooms, cursors, `kakao.lock` | `/var/lib/dori-kakao` (0700) | `dori-kakao` |
+| Settings (`DORI_KAKAO_*` copied from the relay Dori's `dori.env`, paths fixed) | `/etc/dori-kakao/dori.env` | root |
+| Inbox rows and the watcher's output | `/var/lib/dori-kakao-out/{inbox.jsonl,watch.log}` (group: relay Dori, read-only) | `dori-kakao` |
+| Unit | `dori-kakao-watch.service` (`Restart=always`) | root |
+
+The relay Dori sends through one sudo rule (`<relay user> ALL=(dori-kakao) NOPASSWD: /opt/dori-kakao/bin/kakao`): its
+`kakao` command becomes `exec /opt/dori-kakao/bin/kakao-client "$@"`. `kakao.py` passes only `chat list|leave`,
+`message list|send|mark-read`, `member list` and `whoami` (`KAKAO_REFUSED` otherwise, so no `auth`); `message upload`
+files are read by `kakao-client.py` with the relay account's own permissions and reach the watcher account as a tar on
+stdin (plain regular files only, at most 30 and 300 MB), so no path the watcher account can read is ever named. Install
+as root with `install.sh install --relay-user <user> --bundle <dir> --env-from <relay dori.env>`, then `install.sh login`
+(asks for the KakaoTalk login and password on that terminal; signing in again on the same device slot ends the old
+session) and `install.sh start` (waits for `KAKAO_PROOF_READY`). The relay Dori then watches
+`tail -n 0 -F /var/lib/dori-kakao-out/watch.log` through its alert filter instead of running the watcher, and its
+`dori.env` points `DORI_KAKAO_INBOX` at `/var/lib/dori-kakao-out/inbox.jsonl` with `DORI_KAKAO_SELF_ID` removed.
+
 ### Slack as a bot
 
 For a Dori that answers on Slack under its own name. It uses a Slack app's bot, never a member's account or token, and
