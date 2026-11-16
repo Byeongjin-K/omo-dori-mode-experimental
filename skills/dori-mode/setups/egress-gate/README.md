@@ -29,22 +29,27 @@ the listener's handling of Gateway reconnect/invalid-session events before
 attributing it to an upstream unknown opcode.
 
 A tunnel's name rules (the fixed Discord/Google refusals, then `connect_allow`,
-`"*"` included) also cover the name its first client bytes ask for: the TLS
-ClientHello SNI, or the `Host` of a plain HTTP/1 request.
+`"*"` included) also cover the name its first client bytes ask for. What the
+gate demands depends on who vouches for the host, never on how the bytes look:
 
-- **CONNECT to a name.** The order stays the same: name check, public DNS, dial,
-  then `200`. If the client's first bytes are a ClientHello or HTTP request for
-  a name the rules refuse, or one the gate cannot read whole, the gate drops the
-  tunnel before any byte goes upstream. Openings that a TLS or HTTP server could
-  still take as a request must be ones the gate reads strictly:
-  - any TLS record must be a ClientHello, so an alert in front of it is refused;
-  - an opening of token plus whitespace, or a leading empty line, must be a strict
-    HTTP/1 origin-form request with single spaces and CRLF lines, one Host at most,
-    and no folded fields. Anything else is refused (`connect-sni-unreadable`).
+- **Every tunnel.** An opening that is a TLS record (content type 20-23,
+  version 3) must be a ClientHello the gate reads whole. Its SNI, if present,
+  must pass the rules. An alert or any other record in front of it is refused
+  (`connect-sni-unreadable`).
+- **A name a `connect_allow` entry names** (exactly, or as `*.domain`). The
+  owner chose this host, so it keeps the tunnel it had before `"*"`. The order
+  stays the same: name check, public DNS, dial, then `200`. Bytes other than
+  TLS pass opaque: any protocol, server-first ones, SSH, SMTP, or plain HTTP.
+- **A name only `"*"` admits.** No owner choice vouches for this host, so the
+  tunnel must show the gate a name it can read:
+  - a ClientHello, with or without SNI;
+  - or a strict HTTP/1 origin-form request: single spaces, CRLF lines, token
+    fields, one `Host` at most, no control bytes.
 
-  Only openings outside both shapes pass as before: SSH-style banners, binary
-  protocols, server-first protocols, TLS without SNI, and HTTP without Host.
-- **CONNECT to an address.** This covers any numeric spelling, such as
+  Anything else is refused as soon as its first line is in
+  (`connect-sni-unreadable`), because a lenient server might still read it as a
+  request for another host. Other protocols need a named entry.
+- **CONNECT to an address that only `"*"` admits.** This covers any numeric spelling, such as
   `162.159.128.233`, `0xa2.0x9f.0x80.0xe9` or `1572395042`. An address names no
   host, so the gate answers `200` and dials nothing until the first bytes name a
   host. That name must pass the rules, and its public DNS answer must hold that
@@ -54,11 +59,15 @@ ClientHello SNI, or the `Host` of a plain HTTP/1 request.
   - a refused name: `connect-host-denied`
   - an address the name does not resolve to: `connect-sni-address-mismatch`
 
-  The last rule stops pointing an allowed name at another host's address.
+  The last rule stops pointing an allowed name at another host's address. An
+  address written into `connect_allow` is a named entry, so it gets the rules
+  above for named entries.
 
 Two things stay out of reach, because the gate never decrypts the tunnel: a
 Host header inside TLS that differs from the SNI (domain fronting, which the
 major CDNs refuse), and Encrypted Client Hello, whose inner SNI is encrypted.
+What a named host does with the bytes it is sent, a plain `Host` included,
+rests on the owner's choice of that host, as it did before `"*"`.
 
 Owner DM history is available through `POST /api/v10/users/@me/channels` with
 the owner's `recipient_id`, then `GET /api/v10/channels/<id>/messages`. The gate

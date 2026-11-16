@@ -2970,7 +2970,8 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         for opening, eof, reason in (
                 (client_hello(None), False, "connect-sni-required"),
                 (client_hello("93.184.216.34"), False, "connect-sni-required"),
-                (b"\x00\x01binary", False, "connect-sni-required"),
+                (b"\x00\x01binary", False, "connect-sni-unreadable"),
+                (b"EHLO me\r\n", False, "connect-sni-unreadable"),
                 (client_hello("example.com")[:20], True, "connect-sni-unreadable"),
                 (b"\x16\x03\x01\x00\x05\x02\x00\x00\x01\x00", False, "connect-sni-unreadable"),
                 (b"GET / HTTP/1.1\r\nAccept: */*\r\n\r\n", False, "connect-sni-required")):
@@ -2983,25 +2984,38 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.tunnel("1.1.1.1:443", client_hello("example.com")), (200, [], b"", b""))
         self.assertEqual(self.service.records("denials.jsonl")[-1]["reason"], "connect-sni-address-mismatch")
 
-    async def test_connect_to_a_name_holds_its_sni_to_the_name_rules_and_keeps_other_tunnels(self):
+    async def test_connect_to_a_named_entry_holds_its_tls_to_the_name_rules_and_passes_other_protocols(self):
+        # A host the owner named keeps the pre-"*" tunnel: any protocol, but TLS must be a ClientHello whose SNI passes.
+        self.config["connect_allow"] = ["example.com"]
         self.dns["example.com"] = "93.184.216.34"
-        for allow in (["example.com"], ["*"]):
-            self.config["connect_allow"] = allow
-            # a name tunnel dials as before, but a ClientHello for a name the rules refuse never goes through
-            refused = client_hello("discord.com" if allow == ["*"] else "other.example")
-            self.assertEqual(await self.tunnel("example.com:443", refused), (200, ["93.184.216.34"], b"", b""))
-            self.assertEqual(self.service.records("denials.jsonl")[-1]["reason"], "connect-host-denied")
-            for opening in (client_hello("example.com"), client_hello(None), b"\x00binary"):
-                self.assertEqual(await self.tunnel("example.com:443", opening), (200, ["93.184.216.34"], opening, opening))
-            self.assertEqual(await self.tunnel("example.com:443", b"SSH-2.0-client\r\n", banner=b"SSH-2.0-server\r\n"),
-                             (200, ["93.184.216.34"], b"SSH-2.0-client\r\n", b"SSH-2.0-server\r\nSSH-2.0-client\r\n"))
+        alert = b"\x15\x03\x03\x00\x02\x01\x5a"
+        for opening, reason in ((client_hello("other.example"), "connect-host-denied"),
+                                ([alert, client_hello("other.example")], "connect-sni-unreadable")):
+            self.assertEqual(await self.tunnel("example.com:443", opening), (200, ["93.184.216.34"], b"", b""))
+            self.assertEqual(self.service.records("denials.jsonl")[-1]["reason"], reason)
+        for opening in (client_hello("example.com"), client_hello(None), b"\x00binary", b"\x16\x00binary",
+                        b"EHLO me\r\n", [b"SSH-2.0-client ", b"comment\r\n"],
+                        b"GET\x0b/ HTTP/1.1\r\nHost: other.example\r\n\r\n"):
+            joined = b"".join(opening) if isinstance(opening, list) else opening
+            self.assertEqual(await self.tunnel("example.com:443", opening), (200, ["93.184.216.34"], joined, joined))
+        self.assertEqual(await self.tunnel("example.com:443", b"SSH-2.0-client x\r\n", banner=b"SSH-2.0-server\r\n"),
+                         (200, ["93.184.216.34"], b"SSH-2.0-client x\r\n", b"SSH-2.0-server\r\nSSH-2.0-client x\r\n"))
 
-    async def test_connect_to_a_name_refuses_a_tls_or_http_opening_it_cannot_read_strictly(self):
-        # review 1 of #486: whatever a TLS or HTTP server could still take as a request must be one the gate reads.
+    async def test_connect_only_star_admits_must_open_with_a_name_the_gate_reads(self):
+        # reviews 1 and 2 of #486: a tunnel no named entry vouches for passes only a ClientHello or a strict HTTP/1
+        # request whose name passes; every other opening is refused at once (no stall), whatever a server might take.
         self.config["connect_allow"] = ["*"]
         self.dns["example.com"] = "93.184.216.34"
         alert = b"\x15\x03\x03\x00\x02\x01\x5a"  # a warning alert, which BoringSSL skips before the handshake
         for opening, reason in (
+                (client_hello("discord.com"), "connect-host-denied"),
+                (b"\x00binary", "connect-sni-unreadable"),
+                (b"EHLO me\r\n", "connect-sni-unreadable"),
+                (b"SSH-2.0-client comment\r\n", "connect-sni-unreadable"),
+                (b"GET\x0b/ HTTP/1.1\r\nHost: discord.com\r\n\r\n", "connect-sni-unreadable"),
+                (b"GET\x0c/ HTTP/1.1\r\nHost: discord.com\r\n\r\n", "connect-sni-unreadable"),
+                (b" GET / HTTP/1.1\r\nHost: discord.com\r\n\r\n", "connect-sni-unreadable"),
+                ([b"\tGET / HT", b"TP/1.1\r\nHost: discord.com\r\n\r\n"], "connect-sni-unreadable"),
                 (alert + client_hello("discord.com"), "connect-sni-unreadable"),
                 ([alert, client_hello("discord.com")], "connect-sni-unreadable"),
                 ([alert, client_hello("example.com")], "connect-sni-unreadable"),
@@ -3017,7 +3031,8 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
                 ([b"GE", b"T / HTTP/1.1\r\nHost: discord.com\r\n\r\n"], "connect-host-denied")):
             self.assertEqual(await self.tunnel("example.com:443", opening), (200, ["93.184.216.34"], b"", b""))
             self.assertEqual(self.service.records("denials.jsonl")[-1]["reason"], reason)
-        for opening in (b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n", b"GET / HTTP/1.0\r\n\r\n"):
+        for opening in (client_hello("example.com"), client_hello(None),
+                        b"GET / HTTP/1.1\r\nHost: example.com\r\nUser-Agent: a\tb\r\n\r\n", b"GET / HTTP/1.0\r\n\r\n"):
             self.assertEqual(await self.tunnel("example.com:443", opening), (200, ["93.184.216.34"], opening, opening))
 
     async def test_owner_dm_history_is_readable_but_other_dm_history_is_refused(self):

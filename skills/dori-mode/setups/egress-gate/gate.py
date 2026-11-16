@@ -691,18 +691,22 @@ HTTP_TOKEN = rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+"
 
 
 def http_request_name(data: bytes) -> tuple[bool, str | None]:
-    """tunnel_name for bytes an HTTP server could read as a request: only a strict HTTP/1 origin-form request is read
-    (one SP between its three parts, CRLF lines, name: value fields); every looser shape a lenient server might still
-    take (extra spaces, tabs, leading empty lines, bare LF, folded fields, absolute or authority targets) is refused."""
+    """tunnel_name for a tunnel that must show the gate its name, past a TLS record: a strict HTTP/1 origin-form
+    request (one SP between its three parts, CRLF lines, token: value fields) and nothing else. Any other bytes,
+    other protocols and every looser request shape a lenient server might still take included, are refused as soon as
+    the first line is in."""
     end = data.find(b"\r\n\r\n")
     head = data if end < 0 else data[:end + 4]  # the body after the head is not read
-    if re.search(rb"(?<!\r)\n|\r(?!\n|\Z)", head):  # a bare LF or CR (a CR may end the bytes read so far)
+    if re.search(rb"(?<!\r)\n|\r(?!\n|\Z)|[^\t\r\n -~]", head):  # bare LF or CR (a CR may end the bytes so far), controls
+        raise ValueError("http-request")
+    line_end = data.find(b"\r\n")
+    if line_end < 0:
+        return False, None
+    if not re.fullmatch(HTTP_TOKEN + rb" (/[!-~]*|\*) HTTP/1\.[01]", data[:line_end]):
         raise ValueError("http-request")
     if end < 0:
         return False, None
     lines = data[:end].split(b"\r\n")
-    if not re.fullmatch(HTTP_TOKEN + rb" (/[!-~]*|\*) HTTP/1\.[01]", lines[0]):
-        raise ValueError("http-request")
     hosts = []
     for line in lines[1:]:
         key, colon, value = line.partition(b":")
@@ -715,30 +719,32 @@ def http_request_name(data: bytes) -> tuple[bool, str | None]:
     return True, tunnel_host(hosts[0].decode("latin1")) if hosts else None
 
 
-def tunnel_name(data: bytes) -> tuple[bool, str | None]:
-    """The name the first client bytes of a tunnel ask for: a TLS ClientHello's SNI, or the Host of a plain HTTP/1
-    request. (False, None) while more bytes are needed, (True, None) for bytes no TLS or HTTP server reads as a
-    request, a ClientHello without SNI or a request without Host. ValueError for anything a TLS or HTTP server could
-    read as one that is not a ClientHello or strict request the gate reads whole: refused, never passed on unread.
+def tunnel_name(data: bytes, strict: bool) -> tuple[bool, str | None]:
+    """The name the first client bytes of a tunnel ask for. (False, None) while more bytes are needed; ValueError for
+    an opening refused unread. A TLS record (any content type, version 3) must start a ClientHello: its SNI, or None.
+    Past that, a strict tunnel (one no named connect_allow entry vouches for) must be a strict HTTP/1 request: its
+    Host, or None; any other protocol is refused. A tunnel to a named entry passes other bytes opaque: (True, None).
 
-    2026-11-16 (review 1 of #486): "other bytes" once meant whatever this did not recognize, so an alert record before
-    the ClientHello, or a request with two spaces, passed unchecked. Now only openings outside both shapes pass."""
+    2026-11-16 (reviews 1 and 2 of #486): sorting "HTTP-looking" bytes from "other protocols" leaked each time (an
+    alert before the ClientHello, a VT or extra space in the request line) and stalled real text protocols (EHLO, SSH
+    comments). So the line is drawn by who vouches for the host, never by the shape of the bytes."""
     if not data:
         return False, None
-    if 0x14 <= data[0] <= 0x17:  # a TLS record of any content type: only ClientHello records may open a tunnel
-        return client_hello_name(data)
-    if data[:1] in (b"\r", b"\n") or re.match(HTTP_TOKEN + rb"[ \t]", data):
-        return http_request_name(data)
-    if re.fullmatch(HTTP_TOKEN, data):  # may still become a request line
-        return False, None
-    return True, None
+    if 0x14 <= data[0] <= 0x17:
+        if len(data) < 2:
+            return False, None
+        if data[1] == 3:
+            return client_hello_name(data)
+    if not strict:
+        return True, None
+    return http_request_name(data)
 
 
-async def tunnel_opening(reader) -> tuple[bytes, str | None]:
+async def tunnel_opening(reader, strict: bool) -> tuple[bytes, str | None]:
     """The client's first tunnel bytes, read until tunnel_name can tell the name they ask for, and that name."""
     data = b""
     while True:
-        done, name = tunnel_name(data)
+        done, name = tunnel_name(data, strict)
         if done:
             return data, name
         if len(data) >= TUNNEL_OPENING_LIMIT:
@@ -3433,13 +3439,15 @@ class Gate:
         if not match:
             raise Refused("invalid-connect", 400)
         host, port = match[1].lower().rstrip("."), int(match[2])
-        if not self.connect_permitted(host, port):
+        rule = self.connect_rule(host, port)
+        if rule is None:
             raise Refused("connect-host-denied")
         # 2026-11-16 (짱돌's report, kakao-owner-basis review 1): with "*" allowed, CONNECT <public IP> and then a
-        # TLS SNI of discord.com reached Discord past the name rules. An address names no host, so its tunnel answers
-        # 200 first and must name an allowed host that resolves to that very address before the gate dials it (fail
-        # closed); and every tunnel's SNI or HTTP Host meets the same name rules as a CONNECT name (README).
-        address = address_literal(host)
+        # TLS SNI of discord.com reached Discord past the name rules. A tunnel only "*" admits has no host the owner
+        # named, so it must show the gate a name (strict tunnel_opening): to an address it answers 200 first and
+        # must name an allowed host that resolves to that very address before the gate dials it (fail closed). Every
+        # tunnel's TLS SNI meets the same name rules as a CONNECT name (README).
+        address = address_literal(host) if rule == "star" else None
         addresses = None
         if address is None:
             addresses = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
@@ -3486,10 +3494,10 @@ class Gate:
             async def outbound(opening):
                 if address is None:  # the name was checked; what the client's first bytes ask for is checked here
                     try:
-                        opening, name = await tunnel_opening(reader)
+                        opening, name = await tunnel_opening(reader, rule == "star")
                     except ValueError:
                         raise Refused("connect-sni-unreadable", None) from None
-                    if name is not None and not self.connect_permitted(name, port):
+                    if name is not None and self.connect_rule(name, port) is None:
                         raise Refused("connect-host-denied", None)
                 if opening:
                     activity.set()
@@ -3515,27 +3523,33 @@ class Gate:
                 remote_writer.close()
                 await remote_writer.wait_closed()
 
-    def connect_permitted(self, host: str, port: int) -> bool:
-        """The CONNECT name rules, alike for a CONNECT name and for the SNI or Host its tunnel asks for."""
+    def connect_rule(self, host: str, port: int) -> str | None:
+        """The CONNECT name rules, alike for a CONNECT name and for the SNI or Host its tunnel asks for: "named" when
+        an entry names the host (exactly or as *.domain), "star" when only "*" admits it, None when refused."""
         if host == "discord.com" or host.endswith((".google.com", ".googleapis.com")) or host in {"google.com", "googleapis.com"}:
-            return False
+            return None
+        rule = None
         for entry in self.config["connect_allow"]:
             name = entry if isinstance(entry, str) else entry["host"]
             ports = [443] if isinstance(entry, str) else entry.get("ports", [443])
-            if (name == "*" or host == name or name.startswith("*.") and host.endswith(name[1:]) and host != name[2:]) and port in ports:
-                return True
-        return False
+            if port not in ports:
+                continue
+            if host == name or name.startswith("*.") and host.endswith(name[1:]) and host != name[2:]:
+                return "named"
+            if name == "*":
+                rule = "star"
+        return rule
 
     async def address_tunnel(self, reader, address: str, port: int) -> tuple[bytes, list]:
         """For a CONNECT to an address that answered 200: the client's first bytes and the one address to dial, once
         they name a host the rules allow whose public DNS answer holds that address. Every miss closes the tunnel."""
         try:
-            opening, name = await asyncio.wait_for(tunnel_opening(reader), 30)
+            opening, name = await asyncio.wait_for(tunnel_opening(reader, True), 30)
         except (ValueError, TimeoutError, OSError):
             raise Refused("connect-sni-unreadable", None) from None
         if name is None or address_literal(name) is not None:
             raise Refused("connect-sni-required", None)
-        if not self.connect_permitted(name, port):
+        if self.connect_rule(name, port) is None:
             raise Refused("connect-host-denied", None)
         try:
             addresses = await asyncio.get_running_loop().getaddrinfo(name, port, type=socket.SOCK_STREAM)
