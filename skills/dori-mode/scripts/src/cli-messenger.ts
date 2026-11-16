@@ -26,9 +26,13 @@ const sendCommand: Command = async (context) => {
   const to = need("to");
   const status = opt("status");
   if (status !== undefined && (platform !== "discord" || (status !== "working" && status !== "done"))) die("--status takes working or done, with discord");
-  // a bare telegram --thread/--edit gets the telegram id refusal below; on slack and discord opt() refuses it as valueless
-  const thread = platform === "telegram" && flags.values.thread === true ? undefined : opt("thread");
-  const edit = platform === "telegram" && flags.values.edit === true ? undefined : opt("edit");
+  // a bare telegram --thread/--edit gets the telegram id refusal below; on slack and discord opt() refuses it as valueless,
+  // and one given empty ("$UNSET") is refused too: it would post a new top-level message instead of replying or editing
+  // (upstream #191, https://github.com/sisyphuslabs/dori-superagent/pull/191)
+  const present = (flag: "thread" | "edit"): string | undefined =>
+    platform === "telegram" ? (flags.values[flag] === true ? undefined : opt(flag)) : flags.values[flag] === undefined ? undefined : opt(flag) || die(`--${flag} is empty: leave it out to post a new message`);
+  const thread = present("thread");
+  const edit = present("edit");
   const filePaths = ((flags.values.file as (string | boolean)[] | undefined) ?? []).map((p) => (typeof p === "string" ? p.trim() : ""));
   if (filePaths.some((p) => !p)) die("SEND_FILE_REFUSED --file takes a path; nothing was sent", 2);
   if (filePaths.length && platform !== "slack" && platform !== "discord") die(`SEND_FILE_REFUSED --file is only supported for slack and discord, not ${platform}; nothing was sent`, 2);
