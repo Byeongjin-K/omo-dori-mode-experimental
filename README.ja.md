@@ -30,9 +30,9 @@ curl -fsSL https://raw.githubusercontent.com/orientpine/omo-dori-mode-experiment
 
 ## 必要なもの
 
-- [bun](https://bun.sh) 1.3 以上と git
-- レーンのタブ用の [herdr](https://herdr.dev)、またはセッション用の [agent-of-empires (aoe)](https://github.com/njbrake/agent-of-empires) と `tmux`
-- スキルを読み込むコーディングエージェント([OmO](https://github.com/code-yeongyu/oh-my-openagent) 向けに作っていますが、起動コマンドは設定で変えられます)
+- [bun](https://bun.sh) 1.3 以上(`curl -fsSL https://bun.sh/install | bash`)と git(`sudo apt install -y git`)
+- レーンのタブ用の [herdr](https://herdr.dev)、またはセッション用の [agent-of-empires (aoe)](https://github.com/njbrake/agent-of-empires) と `tmux`(herdr: `curl -fsSL https://herdr.dev/install.sh | sh`)
+- スキルを読み込むコーディングエージェント([OmO](https://github.com/code-yeongyu/oh-my-openagent) 向けに作っていますが、起動コマンドは設定で変えられます。OmO: `curl -fsSL https://get.omo.dev/install.sh | bash`)
 - PR のマージと issue のクローズを確認する `gh`(GitHub CLI)、公開バージョンを確認する `npm`
 - ボット本体のための [agent-messenger](https://github.com/agent-messenger/agent-messenger)
 

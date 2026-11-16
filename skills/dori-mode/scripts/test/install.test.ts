@@ -49,6 +49,36 @@ const setup = () => {
   return { upstream, src, file, commitUpstream, install };
 };
 
+// A first-time user without bun or git used to get a bare "bun is required: https://bun.sh"; now the line says how to install it,
+// and a bun its installer just put in ~/.bun/bin (not yet on PATH in that terminal) is used.
+const gitOnlyPath = (root: string): string => {
+  const only = join(root, "git-only");
+  mkdirSync(only);
+  const real = Bun.which("git");
+  if (!real) throw new Error("git not found");
+  writeFileSync(join(only, "git"), `#!/bin/sh\nexec ${real} "$@"\n`);
+  chmodSync(join(only, "git"), 0o755);
+  return `${only}:/bin`;
+};
+
+test("no bun anywhere stops install.sh with the command that installs bun", () => {
+  const { src, install } = setup();
+  const r = install({ PATH: gitOnlyPath(resolve(src, "..")) });
+  expect(r.code).toBe(1);
+  expect(r.err).toContain("curl -fsSL https://bun.sh/install | bash");
+});
+
+test("a bun in ~/.bun/bin that PATH does not list yet is used", () => {
+  const { src, install } = setup();
+  const root = resolve(src, "..");
+  mkdirSync(join(root, "home/.bun/bin"), { recursive: true });
+  writeFileSync(join(root, "home/.bun/bin/bun"), "#!/bin/sh\nexit 0\n");
+  chmodSync(join(root, "home/.bun/bin/bun"), 0o755);
+  const r = install({ PATH: gitOnlyPath(root) });
+  expect(r.err).not.toContain("bun is required");
+  expect(r.code).toBe(0);
+});
+
 test("install.sh over a clean checkout pulls upstream", () => {
   const { upstream, src, commitUpstream, install } = setup();
   commitUpstream("v2\n");

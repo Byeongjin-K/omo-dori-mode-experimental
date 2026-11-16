@@ -32,9 +32,9 @@ Then open your agent inside herdr, or inside an aoe session for the aoe backend,
 
 For native Windows installation, skill registration and `dori serve`, follow the [Windows setup guide](skills/dori-mode/setups/windows/README.md).
 
-- [bun](https://bun.sh) 1.3 or newer, and git
-- either [herdr](https://herdr.dev) for lane tabs, or [agent-of-empires (aoe)](https://github.com/njbrake/agent-of-empires) and `tmux` for lane sessions
-- a coding agent that loads skills (built for [OmO](https://github.com/code-yeongyu/oh-my-openagent); the agent command is configurable)
+- [bun](https://bun.sh) 1.3 or newer (`curl -fsSL https://bun.sh/install | bash`), and git (`sudo apt install -y git`)
+- either [herdr](https://herdr.dev) for lane tabs, or [agent-of-empires (aoe)](https://github.com/njbrake/agent-of-empires) and `tmux` for lane sessions (herdr: `curl -fsSL https://herdr.dev/install.sh | sh`)
+- a coding agent that loads skills (built for [OmO](https://github.com/code-yeongyu/oh-my-openagent); the agent command is configurable; OmO: `curl -fsSL https://get.omo.dev/install.sh | bash`)
 - `gh` (the GitHub CLI) for checking merged PRs and closed issues; `npm` for published versions
 - [agent-messenger](https://github.com/agent-messenger/agent-messenger) for the bot itself
 

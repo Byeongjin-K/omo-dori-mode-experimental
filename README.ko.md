@@ -30,9 +30,9 @@ curl -fsSL https://raw.githubusercontent.com/orientpine/omo-dori-mode-experiment
 
 ## 필요한 것
 
-- [bun](https://bun.sh) 1.3 이상, git
-- 레인 탭용 [herdr](https://herdr.dev), 또는 레인 세션용 [agent-of-empires (aoe)](https://github.com/njbrake/agent-of-empires)와 `tmux`
-- 스킬을 읽는 코딩 에이전트 ([OmO](https://github.com/code-yeongyu/oh-my-openagent) 기준으로 만들었고, 에이전트 실행 명령은 설정으로 바꿀 수 있습니다)
+- [bun](https://bun.sh) 1.3 이상(`curl -fsSL https://bun.sh/install | bash`), git(`sudo apt install -y git`)
+- 레인 탭용 [herdr](https://herdr.dev), 또는 레인 세션용 [agent-of-empires (aoe)](https://github.com/njbrake/agent-of-empires)와 `tmux` (herdr: `curl -fsSL https://herdr.dev/install.sh | sh`)
+- 스킬을 읽는 코딩 에이전트 ([OmO](https://github.com/code-yeongyu/oh-my-openagent) 기준으로 만들었고, 에이전트 실행 명령은 설정으로 바꿀 수 있습니다. OmO: `curl -fsSL https://get.omo.dev/install.sh | bash`)
 - PR 머지와 이슈 종료 확인용 `gh`(GitHub CLI), 배포 버전 확인용 `npm`
 - 봇 자체를 위한 [agent-messenger](https://github.com/agent-messenger/agent-messenger)
 
