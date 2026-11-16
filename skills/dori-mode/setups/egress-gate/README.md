@@ -58,6 +58,28 @@ or a card posted more than 24 hours ago (counted from the card's posting, the me
 answer, the web window's first-fetch rule takes the URLs in the receipt's chosen answer only, never the question's.
 The 24 hours, the write limit per message and the outbound cards stay as for a typed message.
 
+An optional `owner_proof.kakao_relay` accepts an owner's KakaoTalk request handed over by one configured Discord bot.
+Omit this object to keep the feature off. Set `bot_id` to that bot's user id, `owner_ids` to the owner's KakaoTalk
+user ids, `watcher_user` to the account running `kakao-watch.ts`, and `socket` to its abstract socket name
+(`dori-kakao-proof` by default). The example uses placeholders and must be filled locally.
+The relay must quote the owner's text verbatim and include 1 to 5 distinct `kakao:<chat_id>/<log_id>` references
+(for example a line `-# 카톡 근거 kakao:<chat_id>/<log_id>` for each message). Use the relay post's own
+`channel_id/message_id` as `X-Dori-Owner-Message`; the original owner-message and card-answer branches still run first.
+The relay must be that bot's post, never a webhook, at the requested coordinates in the owner's guild. Its posting
+time (from the message id) and every cited message must be within `owner_proof.max_age_hours` (24 by default).
+Within 3 seconds total the gate checks each citation through the abstract Unix socket, first matching Linux
+`SO_PEERCRED` UID to `watcher_user`, then requiring the echoed chat/log, an owner author in `owner_ids`, and `quoted:true`.
+Only the watcher's process-local messages count: the writable inbox cannot supply proof, and after a watcher restart
+only newly received messages can be cited. Missing settings, a different peer, malformed replies, stale records or any
+failed citation refuse with `owner-message-required`. The oldest relay/citation time bounds the proof cache.
+The basis link is the relay's Discord link; change records keep `owner_kakao: {"kakao":[{"chat","log","sent_at"}]}`,
+including after an approval card, with no KakaoTalk text. Outbound mail, outside invites and shares still require cards.
+A relay is a basis for writes only: the web window takes no URL from it (the bot writes the post around the quote).
+The UID check proves the peer is `watcher_user`, not that it is the real watcher, so the watcher, its KakaoTalk login
+and its code must live under an account the relay Dori's agent cannot use (`../discord-aoe/kakao-system/`). Set
+`relay_user` to the relay Dori's own account: when it is missing, unknown or the same account as `watcher_user`, the
+feature is off, because that agent could stop the watcher and answer in its place.
+
 The receipt comes from the gate's own Discord gateway session with the proof token (`owner_proof.gateway_url`, default
 `wss://gateway.discord.gg/?v=10&encoding=json`; Discord sends every session of a bot the same events), which records
 each `INTERACTION_CREATE`: who tapped, which button, on which message in which channel. Only an `UPDATE_MESSAGE`

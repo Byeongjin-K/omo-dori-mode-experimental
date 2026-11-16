@@ -1,0 +1,27 @@
+[Unit]
+Description=Dori KakaoTalk watcher under its own account (owner-basis attestations)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=dori-kakao
+Group=dori-kakao
+WorkingDirectory=/var/lib/dori-kakao
+Environment=HOME=/var/lib/dori-kakao
+Environment=DORI_ENV_FILE=/etc/dori-kakao/dori.env
+Environment=DORI_CONFIG=/etc/dori-kakao/config.json
+Environment=PATH=/opt/dori-kakao/node/bin:/usr/bin:/bin
+ExecStart=/opt/dori-kakao/bin/bun /opt/dori-kakao/src/setups/discord-aoe/kakao-watch.ts
+UMask=0027
+StandardOutput=append:/var/lib/dori-kakao-out/watch.log
+StandardError=append:/var/lib/dori-kakao-out/watch.log
+Restart=always
+RestartSec=10
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/dori-kakao /var/lib/dori-kakao-out
+
+[Install]
+WantedBy=multi-user.target

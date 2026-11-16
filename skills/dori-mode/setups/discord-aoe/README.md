@@ -309,10 +309,12 @@ you are signed in. `DORI_KAKAO_DEVICE_TYPE` (default `tablet`) picks the second-
 | `DORI_KAKAO_POLL_MS` | `8000` | Pause between two polls of all rooms |
 | `DORI_KAKAO_SWEEP_MS` | `300000` | Mark-read sweep interval |
 | `DORI_KAKAO_DISCOVER_MS` | `20000` | New-room discovery interval |
+| `DORI_KAKAO_PROOF_SOCKET` | `dori-kakao-proof` | Linux abstract Unix attestation socket; `off` disables it. Normal watch only, never `--once` or `--mark-read` |
 | `DORI_KAKAO_ACCOUNT_FILE`, `DORI_KAKAO_DEVICE_TYPE` | none, `tablet` | Login only |
 
 - **Rooms.** Every chat the account is in is added to `kakao-rooms.json` (`KAKAO_NEW_ROOM`). `chat list` returns only rooms changed since the last sync and is usually empty once a sync state exists, so the watcher also adds every room in agent-messenger's `kakaotalk-sync-state-*.json` (in `AGENT_MESSENGER_CONFIG_DIR`, default `~/.config/agent-messenger`); such a room is named by its id. A room's first poll starts at its newest message (`KAKAO_CURSOR_INIT`): its backlog is neither taken in nor marked read.
 - **Messages.** Each message from someone else becomes one inbox row and one `KAKAO_MSG <room> <log id> <author>: <text>` line; `kakao-cursors.json` is how far the Dori has read.
+- **Owner basis.** Alongside the watch loop, `KAKAO_PROOF_READY <name>` announces the abstract socket; a bind failure prints one `KAKAO_PROOF_OFF <reason>` and watching continues. The socket answers one JSON line `{chat,log,text}` per connection (16 KiB, 2 seconds total), with `{found,chat,log,author_id,author_kind,sent_at,quoted}` or `{found:false}`. It never returns message text. `quoted` checks a nonempty normalized message within the relay text, removing Discord markdown escapes and collapsing whitespace. Only messages this watcher process received from the KakaoTalk server are held in memory, for 24 hours and at most 5000 entries. The inbox file is never a proof source: a row appended by another process cannot attest. After a watcher restart only messages it receives after the restart can be cited. The verifier checks the peer UID against its configured watcher account.
 - **Read marks.** `kakao-markread.json` keeps, apart from the cursor, how far the server confirmed a mark. A room whose cursor is ahead is marked read at the cursor by `kakao-watch.ts --mark-read <room> <log id> <older log id>` under the lock: it reads the account's own read mark from the server (CHATONROOM), then in a fresh session syncs the room from that mark up to the log id (SYNCMSG) and marks it (NOTIREAD), then reads the mark back in another fresh session. The server acks a NOTIREAD without that sync and drops it, which is why `message mark-read` is not used. From a read mark older than the server keeps, SYNCMSG answers `isOK` false with the oldest id it keeps (`minLogId`) and a NOTIREAD after it is dropped too, so that sync is sent once more from `minLogId`. Only a read-back at or past the log id counts: `KAKAO_MARKREAD_OK <room> <log id> server <read mark>` (with `after <n> failed` after failures). Anything else prints `KAKAO_MARKREAD_FAIL <room> <log id> attempt <n>, retry in <s>s: <error>`, for example `server read mark <id> is behind <log id>`, and backs off (the poll interval doubling, at most two sweeps). A mark-read still pending at a restart is retried. After five failed tries at one log id it prints `KAKAO_MARKREAD_GIVEUP <room> <log id> after 5 failed, not marked again until a newer message: <error>` once, keeps that id in `kakao-markread-giveup.json` (so a restart or a sweep does not start over) and tries again only when a newer message moves the room's cursor.
 - **Rooms with no read mark.** A KakaoTalk channel (room type `PlusChat`, such as the "카카오계정" room the account's notices come from) keeps no read mark the watcher can move, so it is never marked read; its messages still come in. The type comes from `chat list` or from the CHATONROOM the mark reads first, never from a room id; it is saved in `kakao-rooms.json` and the room gets one `KAKAO_MARKREAD_SKIP <room> <chat id> <type>: ...` line.
 - **Open chats.** In an open chat (CHATONROOM type `OM` or `OD`) the server takes a NOTIREAD only with the room's link id. The mark session reads it from CHATINFO, which leaves the read state alone, and sends it as `li`; other rooms send no `li`. An open chat whose CHATINFO has no link id is a `KAKAO_MARKREAD_FAIL` and marks nothing. The account joins an open chat in the official app (agent-messenger has no join command); after that the watcher lists, reads and marks it like any room.
@@ -327,6 +329,31 @@ symlink its `kakao.lock` to the live one (a second lock means a second login, wh
 or past that message, which is what the sender's "1" counts.
 A monitor keeps running the code it started with: after an update that changes `kakao-watch.ts`, stop the running watcher
 and arm the monitor again once (`pgrep -f kakao-watch.ts` shows exactly one).
+
+#### KakaoTalk under its own account
+
+When another Dori may act on the owner's KakaoTalk requests through the gate (`../egress-gate/README.md`,
+`owner_proof.kakao_relay`), the watcher, its login and its code must be out of the relay Dori's reach: a watcher in the
+Dori's own session can be stopped and replaced by its agent. `kakao-system/` runs it as the system account `dori-kakao`:
+
+| Piece | Where | Who can change it |
+|---|---|---|
+| node, agent-messenger, bun and this skill's code | `/opt/dori-kakao` | root |
+| Login (`~/.config/agent-messenger`), rooms, cursors, `kakao.lock` | `/var/lib/dori-kakao` (0700) | `dori-kakao` |
+| Settings (`DORI_KAKAO_*` copied from the relay Dori's `dori.env`, paths fixed) | `/etc/dori-kakao/dori.env` | root |
+| Inbox rows and the watcher's output | `/var/lib/dori-kakao-out/{inbox.jsonl,watch.log}` (group: relay Dori, read-only) | `dori-kakao` |
+| Unit | `dori-kakao-watch.service` (`Restart=always`) | root |
+
+The relay Dori sends through one sudo rule (`<relay user> ALL=(dori-kakao) NOPASSWD: /opt/dori-kakao/bin/kakao`): its
+`kakao` command becomes `exec /opt/dori-kakao/bin/kakao-client "$@"`. `kakao.py` passes only `chat list|leave`,
+`message list|send|mark-read`, `member list` and `whoami` (`KAKAO_REFUSED` otherwise, so no `auth`); `message upload`
+files are read by `kakao-client.py` with the relay account's own permissions and reach the watcher account as a tar on
+stdin (plain regular files only, at most 30 and 300 MB), so no path the watcher account can read is ever named. Install
+as root with `install.sh install --relay-user <user> --bundle <dir> --env-from <relay dori.env>`, then `install.sh login`
+(asks for the KakaoTalk login and password on that terminal; signing in again on the same device slot ends the old
+session) and `install.sh start` (waits for `KAKAO_PROOF_READY`). The relay Dori then watches
+`tail -n 0 -F /var/lib/dori-kakao-out/watch.log` through its alert filter instead of running the watcher, and its
+`dori.env` points `DORI_KAKAO_INBOX` at `/var/lib/dori-kakao-out/inbox.jsonl` with `DORI_KAKAO_SELF_ID` removed.
 
 ### Slack as a bot
 
