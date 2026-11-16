@@ -4,7 +4,7 @@ import { join } from "node:path";
 const dir = join(import.meta.dir, "../../setups/discord-aoe/kakao-system");
 
 test("kakao-system wrappers: allowlist, tar-only uploads, client tar", async () => {
-  const p = Bun.spawn(["python3", "-I", "test_kakao_system.py"], { cwd: dir, stdout: "pipe", stderr: "pipe" });
+  const p = Bun.spawn(["python3", "-I", "-B", "test_kakao_system.py"], { cwd: dir, stdout: "pipe", stderr: "pipe" });
   const [code, err] = [await p.exited, await new Response(p.stderr).text()];
   expect({ code, err: code === 0 ? "" : err }).toEqual({ code: 0, err: "" });
 }, 60000);
