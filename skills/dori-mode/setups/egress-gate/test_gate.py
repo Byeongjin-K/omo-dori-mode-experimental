@@ -66,6 +66,19 @@ def client_hello(name: str | None, records: int = 1) -> bytes:
     return b"".join(b"\x16\x03\x01" + len(piece).to_bytes(2, "big") + piece for piece in pieces)
 
 
+def padded_hello(name: str, pad: int) -> bytes:
+    """A ClientHello for name grown past one TLS record with a padding extension (RFC 7685) and split into records."""
+    entry = b"\x00" + len(name).to_bytes(2, "big") + name.encode()
+    names = len(entry).to_bytes(2, "big") + entry
+    extensions = (b"\x00\x00" + len(names).to_bytes(2, "big") + names + b"\x00\x0b\x00\x02\x01\x00"
+                  + b"\x00\x15" + pad.to_bytes(2, "big") + bytes(pad))
+    body = (b"\x03\x03" + bytes(32) + b"\x00" + b"\x00\x02\x13\x01" + b"\x01\x00"
+            + len(extensions).to_bytes(2, "big") + extensions)
+    handshake = b"\x01" + len(body).to_bytes(3, "big") + body
+    return b"".join(b"\x16\x03\x01" + len(handshake[at:at + 16384]).to_bytes(2, "big") + handshake[at:at + 16384]
+                    for at in range(0, len(handshake), 16384))
+
+
 class GateTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="dori-gate-test-")
@@ -3024,10 +3037,11 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
                 ([allowed, b"GET / HTTP/1.1\r\nHost: discord.com\r\n\r\n"], "connect-sni-unreadable")):
             self.assertEqual(await self.tunnel("example.com:443", opening), (200, ["93.184.216.34"], b"", b""))
             self.assertEqual(self.service.records("denials.jsonl")[-1]["reason"], reason)
-        encrypted = b"\x14\x03\x03\x00\x01\x01" + b"\x17\x03\x03\x00\x05hello" + client_hello("discord.com")
+        spec = b"\x14\x03\x03\x00\x01\x01"  # a dummy ChangeCipherSpec (TLS 1.3 middlebox compatibility)
         for opening in (client_hello("example.com"), client_hello("other.example", records=2),
                         client_hello("example.com") + client_hello("example.com"),  # a second ClientHello, same name
-                        client_hello("example.com") + encrypted):  # past change_cipher_spec the bytes are opaque
+                        client_hello("example.com") + spec + client_hello("example.com"),  # same name after a dummy CCS
+                        client_hello("example.com") + spec + b"\x17\x03\x03\x00\x05hello"):  # CCS then 0-RTT, no more hellos
             self.assertEqual(await self.tunnel("example.com:443", opening), (200, ["93.184.216.34"], opening, opening))
 
     async def test_a_second_client_hello_must_name_the_host_the_gate_checked(self):
@@ -3036,7 +3050,8 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         self.config["connect_allow"] = ["*"]
         self.dns["example.com"] = "93.184.216.34"
         for target in ("example.com:443", "93.184.216.34:443"):
-            for second in (client_hello("discord.com"), client_hello("other.example", records=2), client_hello(None)):
+            for second in (client_hello("discord.com"), client_hello("other.example", records=2), client_hello(None),
+                           b"\x14\x03\x03\x00\x01\x01" + client_hello("discord.com")):  # a dummy CCS cannot hide it
                 status, dials, got, _ = await self.tunnel(target, [client_hello("example.com"), second])
                 self.assertEqual((status, dials), (200, ["93.184.216.34"]))
                 self.assertNotIn(second, got)
@@ -3045,6 +3060,18 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         self.config["connect_allow"] = ["example.com"]
         opening = client_hello("example.com") + client_hello("other.example")
         self.assertEqual(await self.tunnel("example.com:443", opening), (200, ["93.184.216.34"], opening, opening))
+
+    async def test_a_large_client_hello_split_across_records_is_read_then_capped(self):
+        # TLS limits a record to 16 KiB, not the whole ClientHello: a padded hello over that but under the opening cap
+        # must be read for its SNI, while one past the cap fails closed.
+        self.config["connect_allow"] = ["*"]
+        self.dns["example.com"] = "93.184.216.34"
+        big = padded_hello("example.com", 40000)
+        self.assertGreater(len(big), 16384)
+        self.assertEqual(await self.tunnel("example.com:443", big), (200, ["93.184.216.34"], big, big))
+        self.assertEqual(await self.tunnel("example.com:443", padded_hello("example.com", 65505)),
+                         (200, ["93.184.216.34"], b"", b""))
+        self.assertEqual(self.service.records("denials.jsonl")[-1]["reason"], "connect-sni-unreadable")
 
     async def start_openssl_s_server(self):
         openssl = shutil.which("openssl")

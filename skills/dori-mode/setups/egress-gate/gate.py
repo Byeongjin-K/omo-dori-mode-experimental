@@ -710,50 +710,50 @@ def tunnel_name(data: bytes, strict: bool) -> tuple[bool, str | None]:
     raise ValueError("tunnel-not-tls")
 
 
+def as_records(message: bytes) -> bytes:
+    """A handshake message re-framed as TLS handshake records of at most 16384 bytes, so client_hello_name can read a
+    ClientHello the client split its own way, however large."""
+    return b"".join(b"\x16\x03\x01" + len(message[at:at + 16384]).to_bytes(2, "big") + message[at:at + 16384]
+                    for at in range(0, len(message), 16384))
+
+
 class HandshakeWatch:
-    """The client's cleartext TLS handshake on a strict tunnel, record by record, until it turns encrypted (the first
-    change_cipher_spec or application_data record). Every ClientHello in it, the first one included, must name the
-    host the gate checked: a client may change SNI in the second ClientHello after a HelloRetryRequest (Apache Traffic
-    Server PR 14068), so the RFC 8446 rule that it repeats the first is not taken on trust. feed() returns the bytes
-    that may go upstream now; it holds a record that ends inside a handshake message until that message is complete."""
+    """On a tunnel only "*" admits, the client's whole cleartext record stream: every ClientHello, the first and any
+    sent after a HelloRetryRequest, must name the host the gate checked. TLS 1.3 lets a dummy ChangeCipherSpec and
+    0-RTT application data sit between ClientHellos (middlebox compatibility and early data), so neither ends the
+    watch; a changed name is refused before its ClientHello goes upstream. feed() returns the bytes that may go
+    upstream now, holding a record that ends inside a handshake message until that message is whole, and fails closed
+    once an unfinished message passes the cap."""
 
     def __init__(self, name: str):
-        self.name, self.buffer, self.handshake, self.held, self.watching = name, b"", b"", b"", True
+        self.name, self.buffer, self.message = name, b"", b""
 
     def feed(self, data: bytes) -> bytes:
-        if not self.watching:
-            return data
         self.buffer += data
         out = b""
-        while self.watching and len(self.buffer) >= 5:
+        while len(self.buffer) >= 5:
             kind, length = self.buffer[0], int.from_bytes(self.buffer[3:5], "big")
-            if kind not in (0x14, 0x15, 0x16, 0x17) or self.buffer[1] != 3 or not 0 < length <= 18432:
+            if kind not in (0x14, 0x16, 0x17) or self.buffer[1] != 3 or not 0 < length <= 18432:
                 raise ValueError("tls-record")
             if len(self.buffer) < 5 + length:
                 break
             record, self.buffer = self.buffer[:5 + length], self.buffer[5 + length:]
-            if kind in (0x14, 0x17):  # from here on the client's handshake is encrypted
-                if self.handshake:
-                    raise ValueError("tls-record")
-                self.watching = False
-                out += self.held + record + self.buffer
-                self.held = self.buffer = b""
-                return out
-            self.held += record
             if kind == 0x16:
-                self.handshake += record[5:]
-                while len(self.handshake) >= 4 and len(self.handshake) >= 4 + int.from_bytes(self.handshake[1:4], "big"):
-                    size = 4 + int.from_bytes(self.handshake[1:4], "big")
-                    message, self.handshake = self.handshake[:size], self.handshake[size:]
-                    if message[0] == 1:
-                        done, name = client_hello_name(b"\x16\x03\x01" + len(message).to_bytes(2, "big") + message
-                                                       if len(message) <= 16384 else b"")
-                        if not done or name != self.name:
-                            raise ValueError("client-hello-name-changed")
-            if not self.handshake:
-                out += self.held
-                self.held = b""
-        if len(self.held) + len(self.buffer) > TUNNEL_OPENING_LIMIT:
+                self.message += record[5:]
+                while len(self.message) >= 4:
+                    size = 4 + int.from_bytes(self.message[1:4], "big")
+                    if size > TUNNEL_OPENING_LIMIT:
+                        raise ValueError("tls-record")
+                    if len(self.message) < size:
+                        break
+                    done, name = client_hello_name(as_records(self.message[:size]))
+                    if not done or name != self.name:
+                        raise ValueError("client-hello-name-changed")
+                    self.message = self.message[size:]
+            elif self.message:  # a ChangeCipherSpec or application-data record split a ClientHello
+                raise ValueError("tls-record")
+            out += record
+        if len(self.message) > TUNNEL_OPENING_LIMIT or len(self.buffer) > TUNNEL_OPENING_LIMIT:
             raise ValueError("tls-record")
         return out
 
@@ -3517,21 +3517,20 @@ class Gate:
                         raise Refused("connect-sni-unreadable", None) from None
                     if name is not None and self.connect_rule(name, port) is None:
                         raise Refused("connect-host-denied", None)
-                if rule == "star":  # no named entry vouches: the whole cleartext handshake must name the checked host
+                if rule == "star":  # no named entry vouches: every cleartext ClientHello must keep the checked name
                     if name is None:
                         raise Refused("connect-sni-required", None)
                     watch = HandshakeWatch(name)
                     try:
-                        opening = watch.feed(opening)
-                        while watch.watching:
+                        while True:
+                            opening = watch.feed(opening)
                             if opening:
                                 activity.set()
                                 remote_writer.write(opening)
                                 await remote_writer.drain()
-                            chunk = await reader.read(65536)
-                            if not chunk:
+                            opening = await reader.read(65536)
+                            if not opening:
                                 return
-                            opening = watch.feed(chunk)
                     except ValueError as error:
                         reason = "connect-sni-changed" if str(error) == "client-hello-name-changed" else "connect-sni-unreadable"
                         raise Refused(reason, None) from None

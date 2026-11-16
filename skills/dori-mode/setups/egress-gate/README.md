@@ -41,9 +41,10 @@ gate demands depends on who vouches for the host, never on how the bytes look:
   stays the same: name check, public DNS, dial, then `200`. Bytes other than
   TLS pass opaque: any protocol, server-first ones, SSH, SMTP, or plain HTTP.
 - **A name only `"*"` admits.** No owner choice vouches for this host, so the
-  tunnel must speak TLS: it opens with a ClientHello, with or without SNI, and
-  that one handshake names the host for the whole connection. Anything else is
-  refused at its first byte (`connect-sni-unreadable`). That includes plain
+  tunnel must speak TLS: it opens with a ClientHello whose SNI names a host the
+  rules allow, and every ClientHello through the handshake must keep that name; a
+  ClientHello with no SNI is refused (`connect-sni-required`), anything that is not
+  a readable ClientHello at its first byte (`connect-sni-unreadable`). That includes plain
   HTTP, because a checked `Host` covers only the first request on a kept-alive
   connection. Other protocols, plain HTTP among them, need a named entry.
 - **CONNECT to an address that only `"*"` admits.** This covers any numeric spelling, such as
@@ -70,13 +71,16 @@ Host header inside TLS that differs from the SNI (domain fronting, which the
 major CDNs refuse), and Encrypted Client Hello, whose inner SNI is encrypted.
 
 On a tunnel only `"*"` admits, the gate does not trust the client to keep its
-SNI. It reads the cleartext handshake record by record until the first
-`change_cipher_spec` or `application_data`, and every ClientHello in it, the one
-sent after a HelloRetryRequest included, must name the host it checked; a changed
-name is refused (`connect-sni-changed`) before that ClientHello is forwarded, so
-a second name cannot select another host's context on a shared server. RFC 8446
-asks the client to repeat its SNI, but the gate enforces that rather than relying
-on it.
+SNI. It reads the client's cleartext record stream for the whole connection, and
+every ClientHello in it, the one sent after a HelloRetryRequest included, must
+name the host it checked; a changed name is refused (`connect-sni-changed`)
+before that ClientHello is forwarded, so a second name cannot select another
+host's context on a shared server. A dummy `change_cipher_spec` and 0-RTT
+`application_data` may sit between ClientHellos (TLS 1.3 middlebox compatibility
+and early data), so neither ends the check; a ClientHello is read however the
+client split it across records, up to a 64 KiB cap past which the tunnel fails
+closed. RFC 8446 asks the client to repeat its SNI, but the gate enforces that
+rather than relying on it.
 What a named host does with the bytes it is sent, a plain `Host` included,
 rests on the owner's choice of that host, as it did before `"*"`.
 
