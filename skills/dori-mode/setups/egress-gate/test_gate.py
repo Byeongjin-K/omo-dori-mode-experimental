@@ -16,6 +16,7 @@ import os
 import pwd
 from pathlib import Path
 import re
+import shutil
 import socket
 import sys
 import tempfile
@@ -3010,6 +3011,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         for opening, reason in (
                 (client_hello("discord.com"), "connect-host-denied"),
                 (client_hello("discord.com", records=4), "connect-host-denied"),
+                (client_hello(None), "connect-sni-required"),
                 (alert + client_hello("discord.com"), "connect-sni-unreadable"),
                 ([alert, client_hello("example.com")], "connect-sni-unreadable"),
                 (b"\x17\x03\x03\x00\x01\x00", "connect-sni-unreadable"),
@@ -3022,8 +3024,132 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
                 ([allowed, b"GET / HTTP/1.1\r\nHost: discord.com\r\n\r\n"], "connect-sni-unreadable")):
             self.assertEqual(await self.tunnel("example.com:443", opening), (200, ["93.184.216.34"], b"", b""))
             self.assertEqual(self.service.records("denials.jsonl")[-1]["reason"], reason)
-        for opening in (client_hello("example.com"), client_hello(None), client_hello("other.example", records=2)):
+        encrypted = b"\x14\x03\x03\x00\x01\x01" + b"\x17\x03\x03\x00\x05hello" + client_hello("discord.com")
+        for opening in (client_hello("example.com"), client_hello("other.example", records=2),
+                        client_hello("example.com") + client_hello("example.com"),  # a second ClientHello, same name
+                        client_hello("example.com") + encrypted):  # past change_cipher_spec the bytes are opaque
             self.assertEqual(await self.tunnel("example.com:443", opening), (200, ["93.184.216.34"], opening, opening))
+
+    async def test_a_second_client_hello_must_name_the_host_the_gate_checked(self):
+        # dori challenge of the #486 plan (Apache Traffic Server PR 14068): after a HelloRetryRequest a client may send
+        # its second ClientHello with another SNI; on a tunnel nobody vouches for that ClientHello never goes upstream.
+        self.config["connect_allow"] = ["*"]
+        self.dns["example.com"] = "93.184.216.34"
+        for target in ("example.com:443", "93.184.216.34:443"):
+            for second in (client_hello("discord.com"), client_hello("other.example", records=2), client_hello(None)):
+                status, dials, got, _ = await self.tunnel(target, [client_hello("example.com"), second])
+                self.assertEqual((status, dials), (200, ["93.184.216.34"]))
+                self.assertNotIn(second, got)
+                self.assertEqual(self.service.records("denials.jsonl")[-1]["reason"], "connect-sni-changed")
+        # a named entry keeps its opaque tunnel past the first ClientHello
+        self.config["connect_allow"] = ["example.com"]
+        opening = client_hello("example.com") + client_hello("other.example")
+        self.assertEqual(await self.tunnel("example.com:443", opening), (200, ["93.184.216.34"], opening, opening))
+
+    async def start_openssl_s_server(self):
+        openssl = shutil.which("openssl")
+        if openssl is None:
+            self.skipTest("openssl is not installed")
+        certdir = Path(tempfile.mkdtemp(prefix="dori-gate-tls-"))
+        self.addCleanup(shutil.rmtree, certdir, True)
+        subprocess.run([openssl, "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                        "-keyout", str(certdir / "key.pem"), "-out", str(certdir / "cert.pem"),
+                        "-days", "1", "-subj", "/CN=example.com"], check=True, capture_output=True)
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+        # -groups prime256v1 makes the server answer curl's X25519-only key share with a HelloRetryRequest
+        server = await asyncio.create_subprocess_exec(
+            openssl, "s_server", "-accept", f"127.0.0.1:{port}", "-cert", str(certdir / "cert.pem"),
+            "-key", str(certdir / "key.pem"), "-groups", "prime256v1", "-www",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        self.addCleanup(server.kill)
+        while True:
+            line = await asyncio.wait_for(server.stdout.readline(), 15)
+            if not line:
+                raise AssertionError("openssl s_server exited before it listened")
+            if b"ACCEPT" in line:
+                return port
+
+    async def recording_proxy(self, upstream_port):
+        forwarded = bytearray()
+
+        async def handle(client_reader, client_writer):
+            server_reader, server_writer = await asyncio.open_connection("127.0.0.1", upstream_port)
+
+            async def relay(source, destination, keep):
+                try:
+                    while chunk := await source.read(65536):
+                        if keep:
+                            forwarded.extend(chunk)
+                        destination.write(chunk)
+                        await destination.drain()
+                except OSError:
+                    pass
+                finally:
+                    destination.close()
+            await asyncio.gather(relay(client_reader, server_writer, True),
+                                 relay(server_reader, client_writer, False), return_exceptions=True)
+        proxy = await asyncio.start_server(handle, "127.0.0.1", 0)
+        self.addAsyncCleanup(proxy.wait_closed)
+        self.addCleanup(proxy.close)
+        return proxy.sockets[0].getsockname()[1], forwarded
+
+    async def test_an_openssl_hello_retry_request_with_an_unchanged_sni_completes(self):
+        # OpenSSL-backed (review #486): a real HelloRetryRequest sends a second ClientHello with the same SNI; the
+        # gate must let it complete, not block it, so a legitimate connection still works end to end.
+        if shutil.which("curl") is None:
+            self.skipTest("curl is not installed")
+        upstream = await self.start_openssl_s_server()
+        self.config["connect_allow"] = ["*"]
+        self.dns["example.com"] = "93.184.216.34"
+        original = asyncio.open_connection
+
+        async def dial(host, port, *args, **kwargs):
+            if host == "93.184.216.34":
+                return await original("127.0.0.1", upstream)
+            return await original(host, port, *args, **kwargs)
+
+        with patch.object(asyncio, "open_connection", side_effect=dial):
+            curl = await asyncio.create_subprocess_exec(
+                "curl", "-sS", "-k", "-m", "15", "-o", "/dev/null", "-w", "%{http_code}",
+                "-x", f"http://127.0.0.1:{self.ports['connect']}",
+                "--connect-to", "example.com:443:93.184.216.34:443", "https://example.com/",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            code, error = await curl.communicate()
+        self.assertEqual(code, b"200", error.decode())
+        reasons = [record.get("reason") for record in (self.service.records("denials.jsonl") or [])]
+        self.assertNotIn("connect-sni-changed", reasons)
+
+    async def test_an_openssl_endpoints_changed_second_client_hello_is_refused(self):
+        # OpenSSL-backed (review #486): a changed second ClientHello toward a real endpoint is refused before the
+        # gate forwards it, so the disallowed name never reaches the shared OpenSSL server.
+        upstream = await self.start_openssl_s_server()
+        proxy_port, forwarded = await self.recording_proxy(upstream)
+        self.config["connect_allow"] = ["*"]
+        self.dns["example.com"] = "93.184.216.34"
+        original = asyncio.open_connection
+
+        async def dial(host, port, *args, **kwargs):
+            if host == "93.184.216.34":
+                return await original("127.0.0.1", proxy_port)
+            return await original(host, port, *args, **kwargs)
+
+        with patch.object(asyncio, "open_connection", side_effect=dial):
+            reader, writer = await original("127.0.0.1", self.ports["connect"])
+            writer.write(b"CONNECT 93.184.216.34:443 HTTP/1.1\r\nHost: tunnel\r\n\r\n")
+            await writer.drain()
+            await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 5)
+            writer.write(client_hello("example.com") + client_hello("discord.com"))
+            await writer.drain()
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(reader.read(), 5)
+            writer.close()
+            with contextlib.suppress(OSError):
+                await writer.wait_closed()
+        self.assertEqual(self.service.records("denials.jsonl")[-1]["reason"], "connect-sni-changed")
+        self.assertNotIn(client_hello("discord.com"), bytes(forwarded))
 
     async def test_owner_dm_history_is_readable_but_other_dm_history_is_refused(self):
         for channel, expected in [("21", 200), ("22", 403)]:
@@ -3444,6 +3570,14 @@ class TunnelOpeningTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(gate.tunnel_name(hello[:cut], True), (False, None))
                 self.assertEqual(await gate.tunnel_opening(self.Fragments([hello[:cut], hello[cut:]]), True), (hello, name))
             self.assertEqual(await gate.tunnel_opening(self.Fragments([bytes([b]) for b in hello]), True), (hello, name))
+        switched = client_hello("example.com") + client_hello("discord.com")
+        for cut in range(1, len(switched)):
+            watch, sent = gate.HandshakeWatch("example.com"), b""
+            with self.assertRaises(ValueError):
+                sent += watch.feed(switched[:cut])
+                sent += watch.feed(switched[cut:])
+            self.assertNotIn(client_hello("discord.com"), sent)
+            self.assertLessEqual(len(sent), len(client_hello("example.com")))
         alerted = b"\x15\x03\x03\x00\x02\x01\x5a" + client_hello("example.com")
         for cut in range(1, len(alerted)):
             with self.assertRaises(ValueError):

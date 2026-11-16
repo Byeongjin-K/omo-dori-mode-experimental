@@ -58,13 +58,25 @@ gate demands depends on who vouches for the host, never on how the bytes look:
 
   The last rule stops pointing an allowed name at another host's address. An
   address written into `connect_allow` is a named entry, so it gets the rules
-  above for named entries.
+  above for named entries. A host behind DNS load balancing can answer with a
+  rotating or regional set of addresses, so the one a client reached may be
+  absent from the answer the gate resolves moments later; that CONNECT is then
+  refused (`connect-sni-address-mismatch`) even though the name is allowed. A
+  host the owner needs this way goes in `connect_allow` as a named entry, which
+  dials the resolved address without the address-match step.
 
 Two things stay out of reach, because the gate never decrypts the tunnel: a
 Host header inside TLS that differs from the SNI (domain fronting, which the
 major CDNs refuse), and Encrypted Client Hello, whose inner SNI is encrypted.
-The gate reads only the first ClientHello. RFC 8446 requires the second one,
-sent after a HelloRetryRequest, to repeat it, SNI included.
+
+On a tunnel only `"*"` admits, the gate does not trust the client to keep its
+SNI. It reads the cleartext handshake record by record until the first
+`change_cipher_spec` or `application_data`, and every ClientHello in it, the one
+sent after a HelloRetryRequest included, must name the host it checked; a changed
+name is refused (`connect-sni-changed`) before that ClientHello is forwarded, so
+a second name cannot select another host's context on a shared server. RFC 8446
+asks the client to repeat its SNI, but the gate enforces that rather than relying
+on it.
 What a named host does with the bytes it is sent, a plain `Host` included,
 rests on the owner's choice of that host, as it did before `"*"`.
 
