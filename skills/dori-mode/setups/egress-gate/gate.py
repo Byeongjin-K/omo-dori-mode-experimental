@@ -745,13 +745,19 @@ class ServerWatch:
         self.buffer += data
         try:
             while len(self.buffer) >= 5:
-                length = int.from_bytes(self.buffer[3:5], "big")
-                if self.buffer[0] != 0x16 or self.buffer[1] != 3 or not 0 < length <= 16384:
+                kind, length = self.buffer[0], int.from_bytes(self.buffer[3:5], "big")
+                if self.buffer[1] != 3 or not 0 < length <= 16384:
                     raise ValueError("server-record")
                 if len(self.buffer) < 5 + length:
                     break
-                self.message += self.buffer[5:5 + length]
-                self.buffer = self.buffer[5 + length:]
+                record, self.buffer = self.buffer[:5 + length], self.buffer[5 + length:]
+                if kind == 0x14:  # a dummy ChangeCipherSpec may precede the ServerHello; TLS 1.3 ignores it
+                    if self.message or record[5:] != b"\x01":
+                        raise ValueError("server-record")
+                    continue
+                if kind != 0x16:
+                    raise ValueError("server-record")
+                self.message += record[5:]
                 if self.message[0] != 2:
                     raise ValueError("server-hello")
                 if len(self.message) < 4:
@@ -3613,7 +3619,7 @@ class Gate:
                         raise Refused("connect-host-denied", None)
                 if rule == "star" and name is None:
                     raise Refused("connect-sni-required", None)
-                tls = name is not None
+                tls = len(opening) >= 2 and opening[0] == 0x16 and opening[1] == 3  # a TLS ClientHello, with or without SNI
                 if tls:
                     try:
                         for retry in (False, True):

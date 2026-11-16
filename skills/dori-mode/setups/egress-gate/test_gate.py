@@ -3157,6 +3157,28 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
                          (200, ["93.184.216.34"], b"", b""))
         self.assertEqual(self.service.records("denials.jsonl")[-1]["reason"], "connect-sni-unreadable")
 
+    async def test_a_named_tunnel_without_an_sni_still_refuses_an_introduced_retry_name(self):
+        # review #486: a named TLS tunnel whose first ClientHello has no SNI is still inspected; a retry introducing a
+        # blocked name is refused before it reaches the shared endpoint.
+        self.config["connect_allow"] = ["example.com"]
+        self.dns["example.com"] = "93.184.216.34"
+        status, dials, got, _ = await self.tunnel(
+            "example.com:443", [client_hello(None), client_hello("discord.com")], flight=server_hello(hrr=True))
+        self.assertEqual((status, dials), (200, ["93.184.216.34"]))
+        self.assertNotIn(client_hello("discord.com"), got)
+        self.assertEqual(self.service.records("denials.jsonl")[-1]["reason"], "connect-sni-changed")
+        opening = client_hello(None) + b"\x17\x03\x03\x00\x05hello"  # no retry: opaque after the first hello
+        self.assertEqual(await self.tunnel("example.com:443", opening, flight=server_hello()),
+                         (200, ["93.184.216.34"], opening, opening))
+
+    async def test_a_server_that_sends_a_compatibility_ccs_before_its_hello_still_completes(self):
+        self.config["connect_allow"] = ["*"]
+        self.dns["example.com"] = "93.184.216.34"
+        opening = client_hello("example.com") + b"\x17\x03\x03\x00\x05hello"
+        flight = b"\x14\x03\x03\x00\x01\x01" + server_hello()
+        self.assertEqual(await self.tunnel("example.com:443", opening, flight=flight),
+                         (200, ["93.184.216.34"], opening, opening))
+
     async def start_openssl_s_server(self, hrr=True, tls12=False):
         openssl = shutil.which("openssl")
         if openssl is None:
@@ -3761,6 +3783,20 @@ class TunnelOpeningTests(unittest.IsolatedAsyncioTestCase):
                     watch.feed(b"opaque after the first ServerHello")
                     negotiation.decide(bad="server-closed")
                     self.assertEqual((negotiation.hrr, negotiation.bad), (hrr, None))
+
+    async def test_a_dummy_change_cipher_spec_before_the_server_hello_is_ignored(self):
+        ccs = b"\x14\x03\x03\x00\x01\x01"  # a dummy ChangeCipherSpec (RFC 8446 middlebox compatibility)
+        for hrr in (False, True):
+            whole = ccs + server_hello(hrr)
+            for cut in range(0, len(whole)):  # cut 0 is one coalesced feed; the rest split the CCS and the hello
+                negotiation = gate.Negotiation()
+                watch = gate.ServerWatch(negotiation)
+                watch.feed(whole[:cut])
+                watch.feed(whole[cut:])
+                self.assertEqual((negotiation.hrr, negotiation.bad), (hrr, None))
+        reject = gate.Negotiation()
+        gate.ServerWatch(reject).feed(b"\x14\x03\x03\x00\x02\x01\x01" + server_hello())  # not the dummy CCS
+        self.assertEqual(reject.bad, "server-unreadable")
 
     async def test_client_watch_holds_fragments_and_keeps_coalesced_trailing_bytes(self):
         first = client_hello("example.com", records=3)
