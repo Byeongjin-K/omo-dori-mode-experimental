@@ -90,7 +90,8 @@ login() {
   done
   local login password
   LOGIN_FILE=$(runuser -u "$ACCOUNT" -- mktemp "$HOME_DIR/state/login.XXXXXX")
-  trap 'rm -f "$LOGIN_FILE"' EXIT
+  LOGIN_ENV=$(runuser -u "$ACCOUNT" -- mktemp "$HOME_DIR/state/login-env.XXXXXX")
+  trap 'rm -f "$LOGIN_FILE" "$LOGIN_ENV"' EXIT
   if [ -n "$from" ]; then
     grep -E '^(KAKAO_EMAIL|KAKAO_PASSWORD)=' "$from" > "$LOGIN_FILE"
   else
@@ -100,16 +101,24 @@ login() {
     printf 'KAKAO_EMAIL=%s\nKAKAO_PASSWORD=%s\n' "$login" "$password" > "$LOGIN_FILE"
     unset password
   fi
-  as_watcher env DORI_KAKAO_ACCOUNT_FILE="$LOGIN_FILE" "$OPT/bin/bun" "$OPT/src/setups/discord-aoe/kakao-login.ts" "${phone[@]}"
+  # kakao-login.ts drops inherited DORI_KAKAO_* and reads them from its env file, so the account file is named there
+  { cat "$ETC/dori.env"; echo "DORI_KAKAO_ACCOUNT_FILE=$LOGIN_FILE"; } > "$LOGIN_ENV"
+  as_watcher env DORI_ENV_FILE="$LOGIN_ENV" "$OPT/bin/bun" "$OPT/src/setups/discord-aoe/kakao-login.ts" "${phone[@]}"
 }
 
 start() {
-  systemctl enable --now dori-kakao-watch.service
+  # watch.log is append-only: only lines written by this start count, and the unit must still be running
+  local from
+  from=$(($(stat -c %s "$OUT/watch.log") + 1))
+  systemctl enable dori-kakao-watch.service
+  systemctl restart dori-kakao-watch.service
   for _ in $(seq 1 60); do
-    grep -q 'KAKAO_PROOF_READY' "$OUT/watch.log" && { echo "KAKAO_SYSTEM_STARTED"; return 0; }
+    if tail -c "+$from" "$OUT/watch.log" | grep -q 'KAKAO_PROOF_READY' && systemctl is-active --quiet dori-kakao-watch.service; then
+      echo "KAKAO_SYSTEM_STARTED"; return 0
+    fi
     sleep 1
   done
-  echo "KAKAO_SYSTEM_START_FAIL no KAKAO_PROOF_READY in $OUT/watch.log" >&2
+  echo "KAKAO_SYSTEM_START_FAIL no KAKAO_PROOF_READY from this start in $OUT/watch.log" >&2
   tail -n 20 "$OUT/watch.log" >&2
   return 1
 }
