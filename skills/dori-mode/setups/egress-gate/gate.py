@@ -606,6 +606,8 @@ def url_host_allowed(host: str, allowed: list[str]) -> bool:
 
 
 TUNNEL_OPENING_LIMIT = 65536  # the most client bytes the gate reads to find the name a tunnel asks for
+TUNNEL_HANDSHAKE_TIMEOUT = 30
+HELLO_RETRY_RANDOM = bytes.fromhex("cf21ad74e59a6111be1d8c021e65b891c2a211167abb8c5e079e09e2c8a8339c")
 
 
 def address_literal(host: str) -> str | None:
@@ -717,43 +719,119 @@ def as_records(message: bytes) -> bytes:
                     for at in range(0, len(message), 16384))
 
 
-class HandshakeWatch:
-    """On a tunnel only "*" admits, the client's whole cleartext record stream: every ClientHello, the first and any
-    sent after a HelloRetryRequest, must name the host the gate checked. TLS 1.3 lets a dummy ChangeCipherSpec and
-    0-RTT application data sit between ClientHellos (middlebox compatibility and early data), so neither ends the
-    watch; a changed name is refused before its ClientHello goes upstream. feed() returns the bytes that may go
-    upstream now, holding a record that ends inside a handshake message until that message is whole, and fails closed
-    once an unfinished message passes the cap."""
+class Negotiation:
+    """The server's first handshake decision, shared by the two relays and set exactly once."""
 
-    def __init__(self, name: str):
+    def __init__(self):
+        self.hrr, self.bad = False, None
+        self.answered = asyncio.Event()
+
+    def decide(self, hrr: bool = False, bad: str | None = None) -> None:
+        if not self.answered.is_set():
+            self.hrr, self.bad = hrr, bad
+            self.answered.set()
+
+
+class ServerWatch:
+    """Reassemble just the first ServerHello. A failure is remembered, not raised: named non-TLS tunnels ignore it."""
+
+    def __init__(self, negotiation: Negotiation):
+        self.negotiation = negotiation
+        self.buffer, self.message = b"", b""
+
+    def feed(self, data: bytes) -> None:
+        if self.negotiation.answered.is_set():
+            return
+        self.buffer += data
+        try:
+            while len(self.buffer) >= 5:
+                length = int.from_bytes(self.buffer[3:5], "big")
+                if self.buffer[0] != 0x16 or self.buffer[1] != 3 or not 0 < length <= 16384:
+                    raise ValueError("server-record")
+                if len(self.buffer) < 5 + length:
+                    break
+                self.message += self.buffer[5:5 + length]
+                self.buffer = self.buffer[5 + length:]
+                if self.message[0] != 2:
+                    raise ValueError("server-hello")
+                if len(self.message) < 4:
+                    continue
+                size = 4 + int.from_bytes(self.message[1:4], "big")
+                if not 42 <= size <= TUNNEL_OPENING_LIMIT:
+                    raise ValueError("server-hello")
+                if len(self.message) < size:
+                    continue
+                # Wait for the whole declared message, not just the random: a truncated hello is unreadable.
+                message = self.message[:size]
+                session, at = length_prefixed(message, 38, 1)
+                if message[4] != 3 or len(session) > 32 or at + 3 > size:
+                    raise ValueError("server-hello")
+                at += 3  # cipher_suite, compression_method
+                if at < size:  # extensions are optional in TLS 1.2
+                    extensions, at = length_prefixed(message, at, 2)
+                    spot = 0
+                    while spot < len(extensions):
+                        _, spot = length_prefixed(extensions, spot + 2, 2)
+                if at != size:
+                    raise ValueError("server-hello")
+                self.negotiation.decide(hrr=message[6:38] == HELLO_RETRY_RANDOM)
+                break
+        except ValueError:
+            self.negotiation.decide(bad="server-unreadable")
+        if self.negotiation.answered.is_set():
+            self.buffer, self.message = b"", b""
+
+
+class HandshakeWatch:
+    """Hold one complete ClientHello until its SNI matches; leave trailing bytes in buffer for the next phase.
+    Only a retry watch permits dummy CCS and in-flight early data before the hello (RFC 8446 sections 5, 4.2.10).
+    A fragmented hello is held in full, including its record headers, so no unchecked fragment goes upstream."""
+
+    def __init__(self, name: str, retry: bool = False):
         self.name, self.buffer, self.message = name, b"", b""
+        self.retry, self.done, self.records = retry, False, b""
 
     def feed(self, data: bytes) -> bytes:
         self.buffer += data
         out = b""
-        while len(self.buffer) >= 5:
+        while not self.done and len(self.buffer) >= 5:
             kind, length = self.buffer[0], int.from_bytes(self.buffer[3:5], "big")
             if kind not in (0x14, 0x16, 0x17) or self.buffer[1] != 3 or not 0 < length <= 18432:
+                raise ValueError("tls-record")
+            if kind == 0x16 and length > 16384:
                 raise ValueError("tls-record")
             if len(self.buffer) < 5 + length:
                 break
             record, self.buffer = self.buffer[:5 + length], self.buffer[5 + length:]
             if kind == 0x16:
                 self.message += record[5:]
-                while len(self.message) >= 4:
+                if len(self.message) >= 4:
                     size = 4 + int.from_bytes(self.message[1:4], "big")
-                    if size > TUNNEL_OPENING_LIMIT:
+                    if self.message[0] != 1 or size > TUNNEL_OPENING_LIMIT:
                         raise ValueError("tls-record")
-                    if len(self.message) < size:
-                        break
-                    done, name = client_hello_name(as_records(self.message[:size]))
-                    if not done or name != self.name:
-                        raise ValueError("client-hello-name-changed")
-                    self.message = self.message[size:]
-            elif self.message:  # a ChangeCipherSpec or application-data record split a ClientHello
-                raise ValueError("tls-record")
-            out += record
-        if len(self.message) > TUNNEL_OPENING_LIMIT or len(self.buffer) > TUNNEL_OPENING_LIMIT:
+                    if len(self.message) >= size:
+                        done, name = client_hello_name(as_records(self.message[:size]))
+                        if not done or name != self.name:
+                            raise ValueError("client-hello-name-changed")
+                        extra = len(self.message) - size
+                        if extra:  # split a coalesced record rather than forwarding an unchecked next message
+                            tail = record[-extra:]
+                            self.buffer = record[:3] + extra.to_bytes(2, "big") + tail + self.buffer
+                            record = record[:3] + (length - extra).to_bytes(2, "big") + record[5:-extra]
+                        self.done = True
+                self.records += record
+                if len(self.records) > TUNNEL_OPENING_LIMIT:
+                    raise ValueError("tls-record")
+                if self.done:
+                    out += self.records
+                    self.message, self.records = b"", b""
+            else:
+                if not self.retry or self.message:  # other records cannot split a handshake message
+                    raise ValueError("tls-record")
+                if kind == 0x14 and record[5:] != b"\x01":
+                    raise ValueError("tls-record")
+                out += record
+        if len(self.message) > TUNNEL_OPENING_LIMIT or not self.done and len(self.buffer) > TUNNEL_OPENING_LIMIT:
             raise ValueError("tls-record")
         return out
 
@@ -3494,12 +3572,27 @@ class Gate:
                 writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                 await writer.drain()
             activity = asyncio.Event()
+            negotiation = Negotiation()
+            tls = sni is not None
 
             async def pump(source, destination):
                 while chunk := await source.read(65536):
                     activity.set()
                     destination.write(chunk)
                     await destination.drain()
+
+            async def inbound():
+                # Inspect without delaying server-first named protocols. The decision is used only once the
+                # client's opening has an SNI; non-TLS named tunnels ignore it and keep their opaque relay.
+                watch = ServerWatch(negotiation)
+                try:
+                    while chunk := await remote_reader.read(65536):
+                        watch.feed(chunk)
+                        activity.set()
+                        writer.write(chunk)
+                        await writer.drain()
+                finally:
+                    negotiation.decide(bad="server-closed")
 
             async def idle():
                 while True:
@@ -3510,6 +3603,7 @@ class Gate:
                         return
 
             async def outbound(opening, name):
+                nonlocal tls
                 if address is None:  # the name was checked; what the client's first bytes ask for is checked here
                     try:
                         opening, name = await tunnel_opening(reader, rule == "star")
@@ -3517,21 +3611,33 @@ class Gate:
                         raise Refused("connect-sni-unreadable", None) from None
                     if name is not None and self.connect_rule(name, port) is None:
                         raise Refused("connect-host-denied", None)
-                if rule == "star":  # no named entry vouches: every cleartext ClientHello must keep the checked name
-                    if name is None:
-                        raise Refused("connect-sni-required", None)
-                    watch = HandshakeWatch(name)
+                if rule == "star" and name is None:
+                    raise Refused("connect-sni-required", None)
+                tls = name is not None
+                if tls:
                     try:
-                        while True:
-                            opening = watch.feed(opening)
-                            if opening:
-                                activity.set()
-                                remote_writer.write(opening)
-                                await remote_writer.drain()
-                            opening = await reader.read(65536)
-                            if not opening:
-                                return
-                    except ValueError as error:
+                        for retry in (False, True):
+                            watch = HandshakeWatch(name, retry=retry)
+                            while not watch.done:
+                                checked = watch.feed(opening)
+                                if checked:
+                                    activity.set()
+                                    remote_writer.write(checked)
+                                    await remote_writer.drain()
+                                if not watch.done:
+                                    opening = await reader.read(65536)
+                                    if not opening:
+                                        raise ValueError("client-closed")
+                            opening = watch.buffer  # tunnel_opening may have read CH1 + CCS + CH2 together
+                            if not retry:
+                                await asyncio.wait_for(negotiation.answered.wait(), TUNNEL_HANDSHAKE_TIMEOUT)
+                                if negotiation.bad:
+                                    raise ValueError(negotiation.bad)
+                                if not negotiation.hrr:
+                                    break
+                        # No HRR, or the checked retry hello: TLS 1.2 key exchange/CCS/encrypted Finished and
+                        # TLS 1.3 encrypted records are opaque. A client's CCS alone cannot decide this.
+                    except (ValueError, TimeoutError) as error:
                         reason = "connect-sni-changed" if str(error) == "client-hello-name-changed" else "connect-sni-unreadable"
                         raise Refused(reason, None) from None
                 if opening:
@@ -3541,7 +3647,7 @@ class Gate:
                 await pump(reader, remote_writer)
 
             pumps = [asyncio.create_task(outbound(opening, sni)),
-                     asyncio.create_task(pump(remote_reader, writer)),  # a server-first protocol speaks at once
+                     asyncio.create_task(inbound()),
                      asyncio.create_task(idle())]
             try:
                 done, _ = await asyncio.wait(pumps, return_when=asyncio.FIRST_COMPLETED)
@@ -3549,6 +3655,8 @@ class Gate:
                 for task in pumps:
                     task.cancel()
                 await asyncio.gather(*pumps, return_exceptions=True)
+            if tls and negotiation.bad:  # server EOF may finish its relay before outbound can report the failure
+                raise Refused("connect-sni-unreadable", None)
             for task in done:
                 if not task.cancelled() and isinstance(task.exception(), Refused):
                     raise task.exception()

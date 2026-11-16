@@ -35,14 +35,15 @@ gate demands depends on who vouches for the host, never on how the bytes look:
 - **Every tunnel.** An opening that is a TLS record (content type 20-23,
   version 3) must be a ClientHello the gate reads whole. Its SNI, if present,
   must pass the rules. An alert or any other record in front of it is refused
-  (`connect-sni-unreadable`).
+  (`connect-sni-unreadable`). When the opening has an SNI, the server-aware
+  handshake check below applies to named entries as well as `"*"`.
 - **A name a `connect_allow` entry names** (exactly, or as `*.domain`). The
   owner chose this host, so it keeps the tunnel it had before `"*"`. The order
   stays the same: name check, public DNS, dial, then `200`. Bytes other than
   TLS pass opaque: any protocol, server-first ones, SSH, SMTP, or plain HTTP.
 - **A name only `"*"` admits.** No owner choice vouches for this host, so the
   tunnel must speak TLS: it opens with a ClientHello whose SNI names a host the
-  rules allow, and every ClientHello through the handshake must keep that name; a
+  rules allow, and a retry ClientHello after a HelloRetryRequest must keep that name; a
   ClientHello with no SNI is refused (`connect-sni-required`), anything that is not
   a readable ClientHello at its first byte (`connect-sni-unreadable`). That includes plain
   HTTP, because a checked `Host` covers only the first request on a kept-alive
@@ -70,17 +71,28 @@ Two things stay out of reach, because the gate never decrypts the tunnel: a
 Host header inside TLS that differs from the SNI (domain fronting, which the
 major CDNs refuse), and Encrypted Client Hello, whose inner SNI is encrypted.
 
-On a tunnel only `"*"` admits, the gate does not trust the client to keep its
-SNI. It reads the client's cleartext record stream for the whole connection, and
-every ClientHello in it, the one sent after a HelloRetryRequest included, must
-name the host it checked; a changed name is refused (`connect-sni-changed`)
-before that ClientHello is forwarded, so a second name cannot select another
-host's context on a shared server. A dummy `change_cipher_spec` and 0-RTT
-`application_data` may sit between ClientHellos (TLS 1.3 middlebox compatibility
-and early data), so neither ends the check; a ClientHello is read however the
-client split it across records, up to a 64 KiB cap past which the tunnel fails
-closed. RFC 8446 asks the client to repeat its SNI, but the gate enforces that
-rather than relying on it.
+On a TLS tunnel with an SNI, the gate binds to the first ClientHello's checked
+name and reads the server's first handshake message. It must be a readable
+ServerHello; its random identifies a TLS 1.3 HelloRetryRequest (RFC 8446
+section 4.1.3). After a normal ServerHello, the remaining client stream is
+opaque. This includes TLS 1.2 ClientKeyExchange, real ChangeCipherSpec and
+encrypted Finished; a client-side ChangeCipherSpec alone cannot distinguish
+them from TLS 1.3's dummy ChangeCipherSpec.
+
+Only after a HelloRetryRequest does the gate check a second ClientHello against
+the bound SNI. A changed or missing name is refused (`connect-sni-changed`)
+before any fragment of that hello is forwarded. Dummy `change_cipher_spec` and
+in-flight 0-RTT `application_data` may pass between the two hellos, but cannot
+split a hello. Once the retry hello passes, the remaining stream is opaque.
+This covers named-entry TLS tunnels too; named non-TLS protocols remain opaque.
+Encrypted content, including TLS 1.2 renegotiation, is not inspected.
+
+The gate holds pipelined client bytes until the server's decision and reassembles
+hellos across records, with a 64 KiB cap. An unreadable, truncated or non-ServerHello
+first server message, server EOF before that message, or no complete ServerHello
+within 30 seconds fails closed (`connect-sni-unreadable`). The server wait applies
+even if the client sends nothing after its first hello. RFC 8446 asks the client
+to repeat its SNI after a retry, but the gate enforces that rather than relying on it.
 What a named host does with the bytes it is sent, a plain `Host` included,
 rests on the owner's choice of that host, as it did before `"*"`.
 

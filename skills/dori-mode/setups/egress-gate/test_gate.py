@@ -18,6 +18,7 @@ from pathlib import Path
 import re
 import shutil
 import socket
+import ssl
 import sys
 import tempfile
 import time
@@ -77,6 +78,29 @@ def padded_hello(name: str, pad: int) -> bytes:
     handshake = b"\x01" + len(body).to_bytes(3, "big") + body
     return b"".join(b"\x16\x03\x01" + len(handshake[at:at + 16384]).to_bytes(2, "big") + handshake[at:at + 16384]
                     for at in range(0, len(handshake), 16384))
+
+
+def server_hello(hrr: bool = False) -> bytes:
+    """A framed ServerHello, with the RFC 8446 retry random when requested."""
+    random = (bytes.fromhex("cf21ad74e59a6111be1d8c021e65b891c2a211167abb8c5e079e09e2c8a8339c")
+              if hrr else bytes(32))
+    body = b"\x03\x03" + random + b"\x00\x13\x01\x00\x00\x06\x00\x2b\x00\x02\x03\x04"
+    message = b"\x02" + len(body).to_bytes(3, "big") + body
+    return b"\x16\x03\x03" + len(message).to_bytes(2, "big") + message
+
+
+def tls_records(data: bytes) -> list[bytes]:
+    """Split a completed wire capture without interpreting encrypted payloads."""
+    records = []
+    while data:
+        if len(data) < 5:
+            raise AssertionError("incomplete TLS record header")
+        size = 5 + int.from_bytes(data[3:5], "big")
+        if len(data) < size:
+            raise AssertionError("incomplete TLS record body")
+        records.append(data[:size])
+        data = data[size:]
+    return records
 
 
 class GateTests(unittest.IsolatedAsyncioTestCase):
@@ -2904,26 +2928,37 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
                 writer.close()
                 await writer.wait_closed()
 
-    async def tunnel(self, target, opening, banner=b"", eof=False):
+    async def tunnel(self, target, opening, banner=b"", eof=False, flight=None, echo=True, server_eof=False):
         """CONNECT target through the gate, then send opening: (status, addresses the gate dialed, bytes the fake
         upstream got, bytes the client got back). The fake upstream sends banner first, then echoes. A list opening
-        goes out as separate writes."""
+        goes out as separate writes. TLS fakes send flight (a ServerHello by default) on receiving client bytes."""
         parts = opening if isinstance(opening, list) else [opening]
         opening = b"".join(parts)
+        if flight is None:
+            flight = server_hello() if opening.startswith(b"\x16\x03") else b""
         dials, got = [], bytearray()
+        upstream_done = asyncio.Event()
 
         async def upstream(reader, writer):
             try:
                 writer.write(banner)
                 await writer.drain()
+                answered = False
                 while data := await reader.read(65536):
                     got.extend(data)
-                    writer.write(data)
+                    if not answered:
+                        writer.write(flight)
+                        answered = True
+                    if echo:
+                        writer.write(data)
                     await writer.drain()
+                    if server_eof:
+                        return
             finally:
                 writer.close()
                 with contextlib.suppress(OSError):
                     await writer.wait_closed()
+                upstream_done.set()
 
         remote = await asyncio.start_server(upstream, "127.0.0.1", 0)
         self.addAsyncCleanup(remote.wait_closed)
@@ -2951,13 +2986,16 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
                         writer.write_eof()
                     await writer.drain()
                     try:
-                        back += await asyncio.wait_for(reader.readexactly(len(opening)), 5)
+                        answer = await asyncio.wait_for(reader.readexactly(len(flight) + len(opening)), 5)
                     except asyncio.IncompleteReadError as error:  # the gate closed the tunnel
-                        back += error.partial
+                        answer = error.partial
+                    back += answer[len(flight):] if flight and answer.startswith(flight) else answer
             finally:
                 writer.close()
                 with contextlib.suppress(OSError):
                     await writer.wait_closed()
+            if dials:
+                await asyncio.wait_for(upstream_done.wait(), 5)
         return status, dials, bytes(got), back
 
     async def test_connect_to_an_address_is_refused_when_its_sni_or_host_is_a_blocked_name(self):
@@ -3047,19 +3085,65 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_second_client_hello_must_name_the_host_the_gate_checked(self):
         # dori challenge of the #486 plan (Apache Traffic Server PR 14068): after a HelloRetryRequest a client may send
         # its second ClientHello with another SNI; on a tunnel nobody vouches for that ClientHello never goes upstream.
+        self.dns["example.com"] = "93.184.216.34"
+        first = client_hello("example.com")
+        spec = b"\x14\x03\x03\x00\x01\x01"
+        early = b"\x17\x03\x03\x00\x05early"
+        for allowed, target in ((["*"], "example.com:443"), (["*"], "93.184.216.34:443"),
+                                (["example.com"], "example.com:443")):
+            self.config["connect_allow"] = allowed
+            for second in (client_hello("discord.com"), client_hello("other.example", records=2), client_hello(None)):
+                for between in (b"", spec, spec + early):
+                    with self.subTest(allowed=allowed, target=target, second=second, between=between):
+                        status, dials, got, _ = await self.tunnel(
+                            target, first + between + second, flight=server_hello(hrr=True))
+                        self.assertEqual((status, dials), (200, ["93.184.216.34"]))
+                        self.assertTrue(got.startswith(first))
+                        self.assertNotIn(second[:6], got[len(first):])  # no fragment of the rejected hello
+                        self.assertEqual(self.service.records("denials.jsonl")[-1]["reason"], "connect-sni-changed")
+
+    async def test_a_same_name_retry_hello_is_checked_then_the_stream_is_opaque(self):
         self.config["connect_allow"] = ["*"]
         self.dns["example.com"] = "93.184.216.34"
-        for target in ("example.com:443", "93.184.216.34:443"):
-            for second in (client_hello("discord.com"), client_hello("other.example", records=2), client_hello(None),
-                           b"\x14\x03\x03\x00\x01\x01" + client_hello("discord.com")):  # a dummy CCS cannot hide it
-                status, dials, got, _ = await self.tunnel(target, [client_hello("example.com"), second])
-                self.assertEqual((status, dials), (200, ["93.184.216.34"]))
-                self.assertNotIn(second, got)
-                self.assertEqual(self.service.records("denials.jsonl")[-1]["reason"], "connect-sni-changed")
-        # a named entry keeps its opaque tunnel past the first ClientHello
-        self.config["connect_allow"] = ["example.com"]
-        opening = client_hello("example.com") + client_hello("other.example")
-        self.assertEqual(await self.tunnel("example.com:443", opening), (200, ["93.184.216.34"], opening, opening))
+        for second in (client_hello("Example.COM.", records=3), padded_hello("example.com", 40000)):
+            opening = (client_hello("example.com") + b"\x14\x03\x03\x00\x01\x01"
+                       + b"\x17\x03\x03\x00\x05early" + second + b"\x16opaque after retry")
+            self.assertEqual(await self.tunnel("example.com:443", opening, flight=server_hello(hrr=True)),
+                             (200, ["93.184.216.34"], opening, opening))
+
+    async def test_a_normal_server_hello_makes_later_client_bytes_opaque(self):
+        self.config["connect_allow"] = ["*"]
+        self.dns["example.com"] = "93.184.216.34"
+        for tail in (b"\x16\x03\x03\x00\x05\x10\x00\x00\x01\x00"  # TLS 1.2 ClientKeyExchange
+                     + b"\x14\x03\x03\x00\x01\x01" + b"\x16\x03\x03\x00\x06cipher",
+                     client_hello("discord.com"), b"\x16not a record"):
+            opening = client_hello("example.com") + tail
+            self.assertEqual(await self.tunnel("example.com:443", opening),
+                             (200, ["93.184.216.34"], opening, opening))
+
+    async def test_an_unreadable_or_closed_server_fails_before_pipelined_client_bytes(self):
+        self.config["connect_allow"] = ["*"]
+        self.dns["example.com"] = "93.184.216.34"
+        first = client_hello("example.com")
+        for flight in (b"", b"\x15\x03\x03\x00\x02\x02\x28", b"\x17\x03\x03\x00\x01x",
+                       client_hello("example.com"), server_hello()[:30], server_hello()[:-1],
+                       b"\x16\x03\x03\x00\x04\x02\x01\x00\x00",
+                       b"\x16\x03\x03\x00\x04\x02\x00\x00\x00"):
+            with self.subTest(flight=flight):
+                _, _, got, _ = await self.tunnel("example.com:443", first + b"must stay held",
+                                                flight=flight, echo=False, server_eof=True)
+                self.assertEqual(got, first)
+                self.assertEqual(self.service.records("denials.jsonl")[-1]["reason"], "connect-sni-unreadable")
+
+    async def test_a_silent_server_fails_closed_even_without_more_client_bytes(self):
+        self.config["connect_allow"] = ["*"]
+        self.dns["example.com"] = "93.184.216.34"
+        first = client_hello("example.com")
+        # An immediate deadline exercises the actual timeout branch without sleeping or relying on a fast machine.
+        with patch.object(gate, "TUNNEL_HANDSHAKE_TIMEOUT", 0, create=True):
+            _, _, got, back = await self.tunnel("example.com:443", first, flight=b"", echo=False)
+        self.assertEqual((got, back), (first, b""))
+        self.assertEqual(self.service.records("denials.jsonl")[-1]["reason"], "connect-sni-unreadable")
 
     async def test_a_large_client_hello_split_across_records_is_read_then_capped(self):
         # TLS limits a record to 16 KiB, not the whole ClientHello: a padded hello over that but under the opening cap
@@ -3073,7 +3157,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
                          (200, ["93.184.216.34"], b"", b""))
         self.assertEqual(self.service.records("denials.jsonl")[-1]["reason"], "connect-sni-unreadable")
 
-    async def start_openssl_s_server(self):
+    async def start_openssl_s_server(self, hrr=True, tls12=False):
         openssl = shutil.which("openssl")
         if openssl is None:
             self.skipTest("openssl is not installed")
@@ -3086,12 +3170,18 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
         probe.close()
-        # -groups prime256v1 makes the server answer curl's X25519-only key share with a HelloRetryRequest
+        # The client's X25519 key share needs a retry only when the server requires prime256v1.
+        options = ["-tls1_2"] if tls12 else ["-tls1_3", "-groups", "prime256v1" if hrr else "X25519"]
         server = await asyncio.create_subprocess_exec(
             openssl, "s_server", "-accept", f"127.0.0.1:{port}", "-cert", str(certdir / "cert.pem"),
-            "-key", str(certdir / "key.pem"), "-groups", "prime256v1", "-www",
+            "-key", str(certdir / "key.pem"), *options, "-www",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
-        self.addCleanup(server.kill)
+
+        async def stop():
+            if server.returncode is None:
+                server.kill()
+            await server.wait()
+        self.addAsyncCleanup(stop)
         while True:
             line = await asyncio.wait_for(server.stdout.readline(), 15)
             if not line:
@@ -3101,6 +3191,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
 
     async def recording_proxy(self, upstream_port):
         forwarded = bytearray()
+        received = bytearray()
 
         async def handle(client_reader, client_writer):
             server_reader, server_writer = await asyncio.open_connection("127.0.0.1", upstream_port)
@@ -3108,8 +3199,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
             async def relay(source, destination, keep):
                 try:
                     while chunk := await source.read(65536):
-                        if keep:
-                            forwarded.extend(chunk)
+                        (forwarded if keep else received).extend(chunk)
                         destination.write(chunk)
                         await destination.drain()
                 except OSError:
@@ -3121,39 +3211,64 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         proxy = await asyncio.start_server(handle, "127.0.0.1", 0)
         self.addAsyncCleanup(proxy.wait_closed)
         self.addCleanup(proxy.close)
-        return proxy.sockets[0].getsockname()[1], forwarded
+        return proxy.sockets[0].getsockname()[1], forwarded, received
 
     async def test_an_openssl_hello_retry_request_with_an_unchanged_sni_completes(self):
         # OpenSSL-backed (review #486): a real HelloRetryRequest sends a second ClientHello with the same SNI; the
         # gate must let it complete, not block it, so a legitimate connection still works end to end.
+        await self.openssl_handshake(hrr=True)
+
+    async def test_an_openssl_tls13_handshake_without_retry_completes(self):
+        await self.openssl_handshake()
+
+    async def test_an_openssl_tls12_handshake_completes(self):
+        await self.openssl_handshake(tls12=True)
+
+    async def openssl_handshake(self, hrr=False, tls12=False):
         if shutil.which("curl") is None:
             self.skipTest("curl is not installed")
-        upstream = await self.start_openssl_s_server()
+        upstream = await self.start_openssl_s_server(hrr=hrr, tls12=tls12)
+        proxy_port, forwarded, received = await self.recording_proxy(upstream)
         self.config["connect_allow"] = ["*"]
         self.dns["example.com"] = "93.184.216.34"
         original = asyncio.open_connection
 
         async def dial(host, port, *args, **kwargs):
             if host == "93.184.216.34":
-                return await original("127.0.0.1", upstream)
+                return await original("127.0.0.1", proxy_port)
             return await original(host, port, *args, **kwargs)
 
         with patch.object(asyncio, "open_connection", side_effect=dial):
             curl = await asyncio.create_subprocess_exec(
                 "curl", "-sS", "-k", "-m", "15", "-o", "/dev/null", "-w", "%{http_code}",
+                "--noproxy", "", "--curves", "X25519:prime256v1",
+                *(["--tlsv1.2", "--tls-max", "1.2"] if tls12 else ["--tlsv1.3"]),
                 "-x", f"http://127.0.0.1:{self.ports['connect']}",
                 "--connect-to", "example.com:443:93.184.216.34:443", "https://example.com/",
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
             code, error = await curl.communicate()
         self.assertEqual(code, b"200", error.decode())
+        self.assertEqual(curl.returncode, 0, error.decode())
+        hellos = []
+        for record in tls_records(bytes(forwarded)):
+            if tls12 and record[0] == 0x14:
+                break  # encrypted TLS 1.2 Finished bytes must not be counted as a random ClientHello
+            if record[0] == 0x16 and record[5] == 1:
+                hellos.append(record)
+        self.assertEqual(len(hellos), 2 if hrr else 1)
+        retry_random = bytes.fromhex("cf21ad74e59a6111be1d8c021e65b891c2a211167abb8c5e079e09e2c8a8339c")
+        self.assertEqual(tls_records(bytes(received))[0][11:43] == retry_random, hrr)
         reasons = [record.get("reason") for record in (self.service.records("denials.jsonl") or [])]
         self.assertNotIn("connect-sni-changed", reasons)
+        self.assertEqual(reasons, [])
+        label = "TLS1.2" if tls12 else "TLS1.3+HRR" if hrr else "TLS1.3"
+        print(f"OPENSSL_VERIFIED {label} HTTP=200 client_hellos={len(hellos)}")
 
     async def test_an_openssl_endpoints_changed_second_client_hello_is_refused(self):
         # OpenSSL-backed (review #486): a changed second ClientHello toward a real endpoint is refused before the
         # gate forwards it, so the disallowed name never reaches the shared OpenSSL server.
         upstream = await self.start_openssl_s_server()
-        proxy_port, forwarded = await self.recording_proxy(upstream)
+        proxy_port, forwarded, _ = await self.recording_proxy(upstream)
         self.config["connect_allow"] = ["*"]
         self.dns["example.com"] = "93.184.216.34"
         original = asyncio.open_connection
@@ -3168,15 +3283,37 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
             writer.write(b"CONNECT 93.184.216.34:443 HTTP/1.1\r\nHost: tunnel\r\n\r\n")
             await writer.drain()
             await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 5)
-            writer.write(client_hello("example.com") + client_hello("discord.com"))
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            context.minimum_version = ssl.TLSVersion.TLSv1_3
+            incoming, outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
+            client = context.wrap_bio(incoming, outgoing, server_hostname="example.com")
+            with self.assertRaises(ssl.SSLWantReadError):
+                client.do_handshake()
+            first = outgoing.read()
+            writer.write(first)
             await writer.drain()
-            with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(reader.read(), 5)
+            # Give a real HRR to the real TLS client before changing just its retry SNI.
+            while not outgoing.pending:
+                flight = await asyncio.wait_for(reader.read(65536), 5)
+                self.assertTrue(flight, "server closed before the retry ClientHello")
+                incoming.write(flight)
+                with self.assertRaises(ssl.SSLWantReadError):
+                    client.do_handshake()
+            second = outgoing.read()
+            self.assertIn(b"example.com", second)
+            changed = second.replace(b"example.com", b"discord.com")
+            writer.write(changed)
+            await writer.drain()
+            await asyncio.wait_for(reader.read(), 5)
             writer.close()
             with contextlib.suppress(OSError):
                 await writer.wait_closed()
         self.assertEqual(self.service.records("denials.jsonl")[-1]["reason"], "connect-sni-changed")
-        self.assertNotIn(client_hello("discord.com"), bytes(forwarded))
+        self.assertNotIn(b"discord.com", bytes(forwarded))
+        self.assertTrue(bytes(forwarded).startswith(first))
+        print("OPENSSL_VERIFIED changed-SNI-after-HRR refused=connect-sni-changed forwarded=false")
 
     async def test_owner_dm_history_is_readable_but_other_dm_history_is_refused(self):
         for channel, expected in [("21", 200), ("22", 403)]:
@@ -3597,18 +3734,62 @@ class TunnelOpeningTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(gate.tunnel_name(hello[:cut], True), (False, None))
                 self.assertEqual(await gate.tunnel_opening(self.Fragments([hello[:cut], hello[cut:]]), True), (hello, name))
             self.assertEqual(await gate.tunnel_opening(self.Fragments([bytes([b]) for b in hello]), True), (hello, name))
-        switched = client_hello("example.com") + client_hello("discord.com")
+        switched = client_hello("discord.com", records=3)
         for cut in range(1, len(switched)):
-            watch, sent = gate.HandshakeWatch("example.com"), b""
+            watch, sent = gate.HandshakeWatch("example.com", retry=True), b""
             with self.assertRaises(ValueError):
                 sent += watch.feed(switched[:cut])
                 sent += watch.feed(switched[cut:])
-            self.assertNotIn(client_hello("discord.com"), sent)
-            self.assertLessEqual(len(sent), len(client_hello("example.com")))
+            self.assertEqual(sent, b"")  # no part of an unchecked retry hello may reach the server
         alerted = b"\x15\x03\x03\x00\x02\x01\x5a" + client_hello("example.com")
         for cut in range(1, len(alerted)):
             with self.assertRaises(ValueError):
                 await gate.tunnel_opening(self.Fragments([alerted[:cut], alerted[cut:]]), True)
+
+    async def test_server_hello_is_decided_only_when_complete_across_every_split(self):
+        for hrr in (False, True):
+            whole = server_hello(hrr)
+            for records in (whole, gate.as_records(whole[5:18]) + gate.as_records(whole[18:])):
+                for cut in range(1, len(records)):
+                    negotiation = gate.Negotiation()
+                    watch = gate.ServerWatch(negotiation)
+                    watch.feed(records[:cut])
+                    self.assertFalse(negotiation.answered.is_set())
+                    watch.feed(records[cut:])
+                    self.assertTrue(negotiation.answered.is_set())
+                    self.assertEqual((negotiation.hrr, negotiation.bad), (hrr, None))
+                    watch.feed(b"opaque after the first ServerHello")
+                    negotiation.decide(bad="server-closed")
+                    self.assertEqual((negotiation.hrr, negotiation.bad), (hrr, None))
+
+    async def test_client_watch_holds_fragments_and_keeps_coalesced_trailing_bytes(self):
+        first = client_hello("example.com", records=3)
+        for cut in range(1, len(first)):
+            watch = gate.HandshakeWatch("example.com")
+            self.assertEqual(watch.feed(first[:cut]), b"")
+            self.assertFalse(watch.done)
+            self.assertEqual(watch.feed(first[cut:] + b"trailing"), first)
+            self.assertTrue(watch.done)
+            self.assertEqual(watch.buffer, b"trailing")
+        # Even two messages in the same record must not leak the second before the server decides.
+        first, second = client_hello("example.com"), client_hello("discord.com")
+        coalesced = gate.as_records(first[5:] + second[5:])
+        watch = gate.HandshakeWatch("example.com")
+        self.assertEqual(watch.feed(coalesced), first)
+        retry = gate.HandshakeWatch("example.com", retry=True)
+        with self.assertRaisesRegex(ValueError, "client-hello-name-changed"):
+            retry.feed(watch.buffer)
+
+    async def test_retry_hello_cannot_be_split_by_other_records_or_exceed_the_cap(self):
+        hello = client_hello("example.com")
+        for middle in (b"\x14\x03\x03\x00\x01\x01", b"\x17\x03\x03\x00\x01x"):
+            watch = gate.HandshakeWatch("example.com", retry=True)
+            self.assertEqual(watch.feed(gate.as_records(hello[5:20])), b"")
+            with self.assertRaises(ValueError):
+                watch.feed(middle + gate.as_records(hello[20:]))
+        watch = gate.HandshakeWatch("example.com", retry=True)
+        with self.assertRaises(ValueError):
+            watch.feed(padded_hello("example.com", 65505))
 
 
 class IPv6FallbackTests(unittest.TestCase):

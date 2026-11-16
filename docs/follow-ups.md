@@ -2,10 +2,6 @@
 
 Work left out of a merged change on purpose, with why and what would close it. Each entry names the PR that left it.
 
-## Egress gate: a named-entry TLS tunnel does not recheck ClientHellos after the first (#486)
-
-On a tunnel a named `connect_allow` entry admits, the gate checks the first ClientHello's SNI and then forwards the rest opaque, so a second ClientHello after a HelloRetryRequest can name a disallowed virtual host and reach the named host's shared OpenSSL endpoint (review of #486, MEDIUM). #486 scopes the whole-connection ClientHello check to tunnels only `"*"` admits, because a named entry is a host the owner chose to vouch for, and rechecking there would also have to keep non-TLS named protocols (SSH, SMTP, server-first ones) opaque, which this PR does not take on. What would close it: on a named entry whose opening is a TLS ClientHello, run the same per-ClientHello name check (`HandshakeWatch`) the star path uses while leaving non-TLS openings opaque, with a test of a named tunnel whose second ClientHello names a disallowed host.
-
 ## Lead pane: freshness and dead-panes still read leadPane once when they start (#442)
 
 #442 makes each pass of `dori watch` read `leadPane` again (`DORI_LEAD_PANE`, else `config.json`) and hand it to every check of the watch, because a handover restarts only `handover.services` and a watch started before it kept checking, and reviving, the frozen old lead (ZzangDori 2026-11-11, `LEAD_REVIVE_WARN w1:p37 ... no such pane` every ten minutes). The separate `dori freshness --loop` and `dori dead-panes --loop` processes still take `leadPane` from the config they loaded at start, so after a handover that did not restart them they go on naming the old pane (freshness tells and reads the lead's screen there; dead-panes leaves the old pane out of its sweep and treats the new one as a lane-less pane). What would close it: the same per-pass read (hc-pane `leadNow(configPath())`, as `watchCommand` passes `leadPaneNow`) in both loops, with a test of each loop started on the old pane whose config then names the new one.
