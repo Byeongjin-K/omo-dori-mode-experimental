@@ -28,6 +28,74 @@ opcodes, or zlib streams. The listener requests JSON without compression. A
 the listener's handling of Gateway reconnect/invalid-session events before
 attributing it to an upstream unknown opcode.
 
+A tunnel's name rules (the fixed Discord/Google refusals, then `connect_allow`,
+`"*"` included) also cover the name its first client bytes ask for. What the
+gate demands depends on who vouches for the host, never on how the bytes look:
+
+- **Every tunnel.** An opening that is a TLS record (content type 20-23,
+  version 3) must be a ClientHello the gate reads whole. Its SNI, if present,
+  must pass the rules. An alert or any other record in front of it is refused
+  (`connect-sni-unreadable`). When the opening has an SNI, the server-aware
+  handshake check below applies to named entries as well as `"*"`.
+- **A name a `connect_allow` entry names** (exactly, or as `*.domain`). The
+  owner chose this host, so it keeps the tunnel it had before `"*"`. The order
+  stays the same: name check, public DNS, dial, then `200`. Bytes other than
+  TLS pass opaque: any protocol, server-first ones, SSH, SMTP, or plain HTTP.
+- **A name only `"*"` admits.** No owner choice vouches for this host, so the
+  tunnel must speak TLS: it opens with a ClientHello whose SNI names a host the
+  rules allow, and a retry ClientHello after a HelloRetryRequest must keep that name; a
+  ClientHello with no SNI is refused (`connect-sni-required`), anything that is not
+  a readable ClientHello at its first byte (`connect-sni-unreadable`). That includes plain
+  HTTP, because a checked `Host` covers only the first request on a kept-alive
+  connection. Other protocols, plain HTTP among them, need a named entry.
+- **CONNECT to an address that only `"*"` admits.** This covers any numeric spelling, such as
+  `162.159.128.233`, `0xa2.0x9f.0x80.0xe9` or `1572395042`. An address names no
+  host, so the gate answers `200` and dials nothing until a ClientHello's SNI
+  names a host. That name must pass the rules, and its public DNS answer must
+  hold that very address. Otherwise the tunnel closes and nothing is dialed:
+  - no SNI, or an address as the SNI: `connect-sni-required`
+  - not TLS, an unreadable ClientHello, or nothing within 30 s: `connect-sni-unreadable`
+  - a refused name: `connect-host-denied`
+  - an address the name does not resolve to: `connect-sni-address-mismatch`
+
+  The last rule stops pointing an allowed name at another host's address. An
+  address written into `connect_allow` is a named entry, so it gets the rules
+  above for named entries. A host behind DNS load balancing can answer with a
+  rotating or regional set of addresses, so the one a client reached may be
+  absent from the answer the gate resolves moments later; that CONNECT is then
+  refused (`connect-sni-address-mismatch`) even though the name is allowed. A
+  host the owner needs this way goes in `connect_allow` as a named entry, which
+  dials the resolved address without the address-match step.
+
+Two things stay out of reach, because the gate never decrypts the tunnel: a
+Host header inside TLS that differs from the SNI (domain fronting, which the
+major CDNs refuse), and Encrypted Client Hello, whose inner SNI is encrypted.
+
+On a TLS tunnel with an SNI, the gate binds to the first ClientHello's checked
+name and reads the server's first handshake message. It must be a readable
+ServerHello; its random identifies a TLS 1.3 HelloRetryRequest (RFC 8446
+section 4.1.3). After a normal ServerHello, the remaining client stream is
+opaque. This includes TLS 1.2 ClientKeyExchange, real ChangeCipherSpec and
+encrypted Finished; a client-side ChangeCipherSpec alone cannot distinguish
+them from TLS 1.3's dummy ChangeCipherSpec.
+
+Only after a HelloRetryRequest does the gate check a second ClientHello against
+the bound SNI. A changed or missing name is refused (`connect-sni-changed`)
+before any fragment of that hello is forwarded. Dummy `change_cipher_spec` and
+in-flight 0-RTT `application_data` may pass between the two hellos, but cannot
+split a hello. Once the retry hello passes, the remaining stream is opaque.
+This covers named-entry TLS tunnels too; named non-TLS protocols remain opaque.
+Encrypted content, including TLS 1.2 renegotiation, is not inspected.
+
+The gate holds pipelined client bytes until the server's decision and reassembles
+hellos across records, with a 64 KiB cap. An unreadable, truncated or non-ServerHello
+first server message, server EOF before that message, or no complete ServerHello
+within 30 seconds fails closed (`connect-sni-unreadable`). The server wait applies
+even if the client sends nothing after its first hello. RFC 8446 asks the client
+to repeat its SNI after a retry, but the gate enforces that rather than relying on it.
+What a named host does with the bytes it is sent, a plain `Host` included,
+rests on the owner's choice of that host, as it did before `"*"`.
+
 Owner DM history is available through `POST /api/v10/users/@me/channels` with
 the owner's `recipient_id`, then `GET /api/v10/channels/<id>/messages`. The gate
 checks the DM recipients on history reads too; another person's DM is refused.
