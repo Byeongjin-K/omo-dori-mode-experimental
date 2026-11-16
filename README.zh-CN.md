@@ -30,9 +30,9 @@ curl -fsSL https://raw.githubusercontent.com/orientpine/omo-dori-mode-experiment
 
 ## 依赖
 
-- [bun](https://bun.sh) 1.3 或更新版本，以及 git
-- 用于 lane 标签页的 [herdr](https://herdr.dev),或用于 lane 会话的 [agent-of-empires (aoe)](https://github.com/njbrake/agent-of-empires) 和 `tmux`
-- 能加载技能的编程智能体(按 [OmO](https://github.com/code-yeongyu/oh-my-openagent) 设计，启动命令可以在配置里改)
+- [bun](https://bun.sh) 1.3 或更新版本(`curl -fsSL https://bun.sh/install | bash`),以及 git(`sudo apt install -y git`)
+- 用于 lane 标签页的 [herdr](https://herdr.dev),或用于 lane 会话的 [agent-of-empires (aoe)](https://github.com/njbrake/agent-of-empires) 和 `tmux`(herdr: `curl -fsSL https://herdr.dev/install.sh | sh`)
+- 能加载技能的编程智能体(按 [OmO](https://github.com/code-yeongyu/oh-my-openagent) 设计，启动命令可以在配置里改。OmO: `curl -fsSL https://get.omo.dev/install.sh | bash`)
 - 用来确认 PR 合并和 issue 关闭的 `gh`(GitHub CLI),以及确认已发布版本的 `npm`
 - 机器人本身用的 [agent-messenger](https://github.com/agent-messenger/agent-messenger)
 

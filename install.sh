@@ -18,16 +18,19 @@ case "$backend" in
   *) echo "DORI_BACKEND must be herdr or aoe, got: $backend" >&2; exit 1 ;;
 esac
 
-command -v bun >/dev/null || { echo "bun is required: https://bun.sh" >&2; exit 1; }
-command -v git >/dev/null || { echo "git is required" >&2; exit 1; }
+# bun's own installer adds ~/.bun/bin to PATH only for new terminals; the terminal it ran in still finds it here
+command -v bun >/dev/null || [ ! -x "$HOME/.bun/bin/bun" ] || export PATH="$HOME/.bun/bin:$PATH"
+command -v bun >/dev/null || { echo "bun is required. Install it with: curl -fsSL https://bun.sh/install | bash   then run this again" >&2; exit 1; }
+command -v git >/dev/null || { echo "git is required. Install it with: sudo apt install -y git (Fedora: sudo dnf install -y git, macOS: xcode-select --install)   then run this again" >&2; exit 1; }
 
 have() { command -v "$1" >/dev/null; }
 if [ "$backend" = aoe ]; then
   for tool in aoe tmux; do have "$tool" || echo "warning: backend aoe needs $tool on PATH; lanes cannot open until it is installed" >&2; done
 else
-  have herdr || echo "warning: backend herdr needs herdr on PATH; lanes cannot open until it is installed (or rerun with DORI_BACKEND=aoe for aoe/tmux)" >&2
+  have herdr || echo "warning: backend herdr needs herdr on PATH; lanes cannot open until it is installed: curl -fsSL https://herdr.dev/install.sh | sh (or rerun with DORI_BACKEND=aoe for aoe/tmux)" >&2
 fi
 have herdr || { have aoe && have tmux; } || echo "warning: no lane backend found: install herdr, or aoe and tmux" >&2
+have omo || echo "note: omo not found; the Dori lead and its lanes run an agent, built for omo: curl -fsSL https://get.omo.dev/install.sh | bash (or set agentCommand in ~/.dori/config.json)" >&2
 have gh || echo "note: gh not found; the done checks that read PRs and issues need it" >&2
 have agent-messenger || echo "note: agent-messenger not found; it is optional for Slack, Telegram and Discord messaging" >&2
 
