@@ -2892,7 +2892,10 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
 
     async def tunnel(self, target, opening, banner=b"", eof=False):
         """CONNECT target through the gate, then send opening: (status, addresses the gate dialed, bytes the fake
-        upstream got, bytes the client got back). The fake upstream sends banner first, then echoes."""
+        upstream got, bytes the client got back). The fake upstream sends banner first, then echoes. A list opening
+        goes out as separate writes."""
+        parts = opening if isinstance(opening, list) else [opening]
+        opening = b"".join(parts)
         dials, got = [], bytearray()
 
         async def upstream(reader, writer):
@@ -2927,7 +2930,9 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
                 if status == 200:
                     if banner:  # a server-first protocol: its greeting comes before any client byte
                         back = await asyncio.wait_for(reader.readexactly(len(banner)), 5)
-                    writer.write(opening)
+                    for part in parts:
+                        writer.write(part)
+                        await writer.drain()
                     if eof:
                         writer.write_eof()
                     await writer.drain()
@@ -2968,7 +2973,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
                 (b"\x00\x01binary", False, "connect-sni-required"),
                 (client_hello("example.com")[:20], True, "connect-sni-unreadable"),
                 (b"\x16\x03\x01\x00\x05\x02\x00\x00\x01\x00", False, "connect-sni-unreadable"),
-                (b"GET / HTTP/1.1\r\nAccept: */*\r\n\r\n", False, "connect-sni-unreadable")):
+                (b"GET / HTTP/1.1\r\nAccept: */*\r\n\r\n", False, "connect-sni-required")):
             self.assertEqual(await self.tunnel("93.184.216.34:443", opening, eof=eof), (200, [], b"", b""))
             self.assertEqual(self.service.records("denials.jsonl")[-1]["reason"], reason)
 
@@ -2988,8 +2993,32 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.service.records("denials.jsonl")[-1]["reason"], "connect-host-denied")
             for opening in (client_hello("example.com"), client_hello(None), b"\x00binary"):
                 self.assertEqual(await self.tunnel("example.com:443", opening), (200, ["93.184.216.34"], opening, opening))
-            self.assertEqual(await self.tunnel("example.com:443", b"EHLO me\r\n", banner=b"220 ready\r\n"),
-                             (200, ["93.184.216.34"], b"EHLO me\r\n", b"220 ready\r\nEHLO me\r\n"))
+            self.assertEqual(await self.tunnel("example.com:443", b"SSH-2.0-client\r\n", banner=b"SSH-2.0-server\r\n"),
+                             (200, ["93.184.216.34"], b"SSH-2.0-client\r\n", b"SSH-2.0-server\r\nSSH-2.0-client\r\n"))
+
+    async def test_connect_to_a_name_refuses_a_tls_or_http_opening_it_cannot_read_strictly(self):
+        # review 1 of #486: whatever a TLS or HTTP server could still take as a request must be one the gate reads.
+        self.config["connect_allow"] = ["*"]
+        self.dns["example.com"] = "93.184.216.34"
+        alert = b"\x15\x03\x03\x00\x02\x01\x5a"  # a warning alert, which BoringSSL skips before the handshake
+        for opening, reason in (
+                (alert + client_hello("discord.com"), "connect-sni-unreadable"),
+                ([alert, client_hello("discord.com")], "connect-sni-unreadable"),
+                ([alert, client_hello("example.com")], "connect-sni-unreadable"),
+                (b"\x17\x03\x03\x00\x01\x00", "connect-sni-unreadable"),
+                (b"GET  / HTTP/1.1\r\nHost: discord.com\r\n\r\n", "connect-sni-unreadable"),
+                (b"GET\t/ HTTP/1.1\r\nHost: discord.com\r\n\r\n", "connect-sni-unreadable"),
+                (b"\r\nGET / HTTP/1.1\r\nHost: discord.com\r\n\r\n", "connect-sni-unreadable"),
+                (b"GET / HTTP/1.1\nHost: discord.com\n\n", "connect-sni-unreadable"),
+                (b"GET / HTTP/1.1\r\nX: a\r\n Host: discord.com\r\n\r\n", "connect-sni-unreadable"),
+                (b"GET http://discord.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n", "connect-sni-unreadable"),
+                (b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n", "connect-sni-unreadable"),
+                (b"GET / HTTP/1.1\r\nHost: example.com\r\nHost: discord.com\r\n\r\n", "connect-sni-unreadable"),
+                ([b"GE", b"T / HTTP/1.1\r\nHost: discord.com\r\n\r\n"], "connect-host-denied")):
+            self.assertEqual(await self.tunnel("example.com:443", opening), (200, ["93.184.216.34"], b"", b""))
+            self.assertEqual(self.service.records("denials.jsonl")[-1]["reason"], reason)
+        for opening in (b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n", b"GET / HTTP/1.0\r\n\r\n"):
+            self.assertEqual(await self.tunnel("example.com:443", opening), (200, ["93.184.216.34"], opening, opening))
 
     async def test_owner_dm_history_is_readable_but_other_dm_history_is_refused(self):
         for channel, expected in [("21", 200), ("22", 403)]:

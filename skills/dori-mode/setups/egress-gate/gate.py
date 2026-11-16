@@ -687,33 +687,51 @@ def client_hello_name(data: bytes) -> tuple[bool, str | None]:
     return True, name
 
 
-def tunnel_name(data: bytes) -> tuple[bool, str | None]:
-    """The name the first client bytes of a tunnel ask for: a TLS ClientHello's SNI, or the Host of a plain HTTP/1
-    request. (False, None) while more bytes are needed, (True, None) for other bytes or a ClientHello without SNI.
-    ValueError for a ClientHello or request the gate cannot read whole: refused, never passed on unread."""
-    if not data:
-        return False, None
-    if data[0] == 0x16:
-        return client_hello_name(data)
-    if re.fullmatch(rb"[A-Z]{1,16}", data):
-        return False, None
-    if not re.match(rb"[A-Z]{1,16} ", data):
-        return True, None
-    line_end = data.find(b"\r\n")
-    if line_end < 0:
-        return False, None
-    if not re.fullmatch(rb"[A-Z]{1,16} \S+ HTTP/1\.[01]", data[:line_end]):
-        return True, None
+HTTP_TOKEN = rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+"
+
+
+def http_request_name(data: bytes) -> tuple[bool, str | None]:
+    """tunnel_name for bytes an HTTP server could read as a request: only a strict HTTP/1 origin-form request is read
+    (one SP between its three parts, CRLF lines, name: value fields); every looser shape a lenient server might still
+    take (extra spaces, tabs, leading empty lines, bare LF, folded fields, absolute or authority targets) is refused."""
     end = data.find(b"\r\n\r\n")
+    head = data if end < 0 else data[:end + 4]  # the body after the head is not read
+    if re.search(rb"(?<!\r)\n|\r(?!\n|\Z)", head):  # a bare LF or CR (a CR may end the bytes read so far)
+        raise ValueError("http-request")
     if end < 0:
         return False, None
-    request = data[:end].decode("latin1").split("\r\n")
-    if "://" in request[0].split(" ")[1]:  # an absolute-form target names its own host beside Host
-        raise ValueError("tunnel-host")
-    hosts = [value for key, _, value in (line.partition(":") for line in request[1:]) if key.strip().lower() == "host"]
-    if len(hosts) != 1:
-        raise ValueError("tunnel-host")
-    return True, tunnel_host(hosts[0])
+    lines = data[:end].split(b"\r\n")
+    if not re.fullmatch(HTTP_TOKEN + rb" (/[!-~]*|\*) HTTP/1\.[01]", lines[0]):
+        raise ValueError("http-request")
+    hosts = []
+    for line in lines[1:]:
+        key, colon, value = line.partition(b":")
+        if not colon or not re.fullmatch(HTTP_TOKEN, key):
+            raise ValueError("http-request")
+        if key.lower() == b"host":
+            hosts.append(value)
+    if len(hosts) > 1:
+        raise ValueError("http-request")
+    return True, tunnel_host(hosts[0].decode("latin1")) if hosts else None
+
+
+def tunnel_name(data: bytes) -> tuple[bool, str | None]:
+    """The name the first client bytes of a tunnel ask for: a TLS ClientHello's SNI, or the Host of a plain HTTP/1
+    request. (False, None) while more bytes are needed, (True, None) for bytes no TLS or HTTP server reads as a
+    request, a ClientHello without SNI or a request without Host. ValueError for anything a TLS or HTTP server could
+    read as one that is not a ClientHello or strict request the gate reads whole: refused, never passed on unread.
+
+    2026-11-16 (review 1 of #486): "other bytes" once meant whatever this did not recognize, so an alert record before
+    the ClientHello, or a request with two spaces, passed unchecked. Now only openings outside both shapes pass."""
+    if not data:
+        return False, None
+    if 0x14 <= data[0] <= 0x17:  # a TLS record of any content type: only ClientHello records may open a tunnel
+        return client_hello_name(data)
+    if data[:1] in (b"\r", b"\n") or re.match(HTTP_TOKEN + rb"[ \t]", data):
+        return http_request_name(data)
+    if re.fullmatch(HTTP_TOKEN, data):  # may still become a request line
+        return False, None
+    return True, None
 
 
 async def tunnel_opening(reader) -> tuple[bytes, str | None]:

@@ -35,8 +35,15 @@ ClientHello SNI, or the `Host` of a plain HTTP/1 request.
 - **CONNECT to a name.** The order stays the same: name check, public DNS, dial,
   then `200`. If the client's first bytes are a ClientHello or HTTP request for
   a name the rules refuse, or one the gate cannot read whole, the gate drops the
-  tunnel before any byte goes upstream. Other protocols, server-first ones, and
-  TLS without SNI pass as before.
+  tunnel before any byte goes upstream. Openings that a TLS or HTTP server could
+  still take as a request must be ones the gate reads strictly:
+  - any TLS record must be a ClientHello, so an alert in front of it is refused;
+  - an opening of token plus whitespace, or a leading empty line, must be a strict
+    HTTP/1 origin-form request with single spaces and CRLF lines, one Host at most,
+    and no folded fields. Anything else is refused (`connect-sni-unreadable`).
+
+  Only openings outside both shapes pass as before: SSH-style banners, binary
+  protocols, server-first protocols, TLS without SNI, and HTTP without Host.
 - **CONNECT to an address.** This covers any numeric spelling, such as
   `162.159.128.233`, `0xa2.0x9f.0x80.0xe9` or `1572395042`. An address names no
   host, so the gate answers `200` and dials nothing until the first bytes name a
