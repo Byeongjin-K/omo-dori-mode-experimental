@@ -2951,8 +2951,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         # discord.com reached Discord. No byte may reach the address and the gate may not even dial it.
         self.config["connect_allow"] = ["*"]
         for target in ("162.159.128.233:443", "0xa2.0x9f.0x80.0xe9:443", "1572395042:443"):  # any numeric spelling
-            for opening in (client_hello("discord.com"), client_hello("www.googleapis.com", records=2),
-                            b"GET / HTTP/1.1\r\nHost: discord.com\r\n\r\n"):
+            for opening in (client_hello("discord.com"), client_hello("www.googleapis.com", records=2)):
                 self.assertEqual(await self.tunnel(target, opening), (200, [], b"", b""))
                 self.assertEqual(self.service.records("denials.jsonl")[-1]["reason"], "connect-host-denied")
 
@@ -2960,8 +2959,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         self.config["connect_allow"] = ["*"]
         self.dns["example.com"] = "93.184.216.34"
         for target in ("93.184.216.34:443", "1572395042:443"):
-            for opening in (client_hello("example.com"), client_hello("Example.COM.", records=3),
-                            b"GET / HTTP/1.1\r\nHost: example.com:443\r\n\r\n"):
+            for opening in (client_hello("example.com"), client_hello("Example.COM.", records=3)):
                 self.assertEqual(await self.tunnel(target, opening), (200, ["93.184.216.34"], opening, opening))
 
     async def test_connect_to_an_address_without_a_readable_name_is_refused(self):
@@ -2974,7 +2972,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
                 (b"EHLO me\r\n", False, "connect-sni-unreadable"),
                 (client_hello("example.com")[:20], True, "connect-sni-unreadable"),
                 (b"\x16\x03\x01\x00\x05\x02\x00\x00\x01\x00", False, "connect-sni-unreadable"),
-                (b"GET / HTTP/1.1\r\nAccept: */*\r\n\r\n", False, "connect-sni-required")):
+                (b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n", False, "connect-sni-unreadable")):
             self.assertEqual(await self.tunnel("93.184.216.34:443", opening, eof=eof), (200, [], b"", b""))
             self.assertEqual(self.service.records("denials.jsonl")[-1]["reason"], reason)
 
@@ -3001,38 +2999,30 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.tunnel("example.com:443", b"SSH-2.0-client x\r\n", banner=b"SSH-2.0-server\r\n"),
                          (200, ["93.184.216.34"], b"SSH-2.0-client x\r\n", b"SSH-2.0-server\r\nSSH-2.0-client x\r\n"))
 
-    async def test_connect_only_star_admits_must_open_with_a_name_the_gate_reads(self):
-        # reviews 1 and 2 of #486: a tunnel no named entry vouches for passes only a ClientHello or a strict HTTP/1
-        # request whose name passes; every other opening is refused at once (no stall), whatever a server might take.
+    async def test_connect_only_star_admits_must_speak_tls_with_a_name_that_passes(self):
+        # reviews 1-3 of #486: a tunnel no named entry vouches for must open with a ClientHello, which names the host
+        # for the whole connection; anything else is refused at its first byte (no stall). Plain HTTP is refused too:
+        # a checked Host covers only the first request of a kept-alive connection.
         self.config["connect_allow"] = ["*"]
         self.dns["example.com"] = "93.184.216.34"
         alert = b"\x15\x03\x03\x00\x02\x01\x5a"  # a warning alert, which BoringSSL skips before the handshake
+        allowed = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"
         for opening, reason in (
                 (client_hello("discord.com"), "connect-host-denied"),
+                (client_hello("discord.com", records=4), "connect-host-denied"),
+                (alert + client_hello("discord.com"), "connect-sni-unreadable"),
+                ([alert, client_hello("example.com")], "connect-sni-unreadable"),
+                (b"\x17\x03\x03\x00\x01\x00", "connect-sni-unreadable"),
                 (b"\x00binary", "connect-sni-unreadable"),
                 (b"EHLO me\r\n", "connect-sni-unreadable"),
                 (b"SSH-2.0-client comment\r\n", "connect-sni-unreadable"),
                 (b"GET\x0b/ HTTP/1.1\r\nHost: discord.com\r\n\r\n", "connect-sni-unreadable"),
-                (b"GET\x0c/ HTTP/1.1\r\nHost: discord.com\r\n\r\n", "connect-sni-unreadable"),
-                (b" GET / HTTP/1.1\r\nHost: discord.com\r\n\r\n", "connect-sni-unreadable"),
-                ([b"\tGET / HT", b"TP/1.1\r\nHost: discord.com\r\n\r\n"], "connect-sni-unreadable"),
-                (alert + client_hello("discord.com"), "connect-sni-unreadable"),
-                ([alert, client_hello("discord.com")], "connect-sni-unreadable"),
-                ([alert, client_hello("example.com")], "connect-sni-unreadable"),
-                (b"\x17\x03\x03\x00\x01\x00", "connect-sni-unreadable"),
-                (b"GET  / HTTP/1.1\r\nHost: discord.com\r\n\r\n", "connect-sni-unreadable"),
-                (b"GET\t/ HTTP/1.1\r\nHost: discord.com\r\n\r\n", "connect-sni-unreadable"),
-                (b"\r\nGET / HTTP/1.1\r\nHost: discord.com\r\n\r\n", "connect-sni-unreadable"),
-                (b"GET / HTTP/1.1\nHost: discord.com\n\n", "connect-sni-unreadable"),
-                (b"GET / HTTP/1.1\r\nX: a\r\n Host: discord.com\r\n\r\n", "connect-sni-unreadable"),
-                (b"GET http://discord.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n", "connect-sni-unreadable"),
-                (b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n", "connect-sni-unreadable"),
-                (b"GET / HTTP/1.1\r\nHost: example.com\r\nHost: discord.com\r\n\r\n", "connect-sni-unreadable"),
-                ([b"GE", b"T / HTTP/1.1\r\nHost: discord.com\r\n\r\n"], "connect-host-denied")):
+                (allowed, "connect-sni-unreadable"),
+                (allowed + b"GET / HTTP/1.1\r\nHost: discord.com\r\n\r\n", "connect-sni-unreadable"),
+                ([allowed, b"GET / HTTP/1.1\r\nHost: discord.com\r\n\r\n"], "connect-sni-unreadable")):
             self.assertEqual(await self.tunnel("example.com:443", opening), (200, ["93.184.216.34"], b"", b""))
             self.assertEqual(self.service.records("denials.jsonl")[-1]["reason"], reason)
-        for opening in (client_hello("example.com"), client_hello(None),
-                        b"GET / HTTP/1.1\r\nHost: example.com\r\nUser-Agent: a\tb\r\n\r\n", b"GET / HTTP/1.0\r\n\r\n"):
+        for opening in (client_hello("example.com"), client_hello(None), client_hello("other.example", records=2)):
             self.assertEqual(await self.tunnel("example.com:443", opening), (200, ["93.184.216.34"], opening, opening))
 
     async def test_owner_dm_history_is_readable_but_other_dm_history_is_refused(self):
@@ -3434,6 +3424,30 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.web("/search?q=rust", proof=False, headers=order))[0], 200)
         status, _ = await self.web("/fetch?url=" + quote("https://example.net/page", safe=""), proof=False, headers=order)
         self.assertEqual(status, 403)
+
+
+class TunnelOpeningTests(unittest.IsolatedAsyncioTestCase):
+    """tunnel_opening fed prescribed fragments (review 3 of #486): socket writes do not fix the gate's read
+    boundaries, so every split point is given here, inside record headers, handshake lengths and the SNI alike."""
+
+    class Fragments:
+        def __init__(self, pieces):
+            self.pieces = list(pieces)
+
+        async def read(self, limit):
+            return self.pieces.pop(0) if self.pieces else b""
+
+    async def test_no_split_changes_the_name_and_no_prefix_is_decided_early(self):
+        for hello, name in ((client_hello("discord.com"), "discord.com"), (client_hello("example.com", records=3), "example.com"),
+                            (client_hello(None), None)):
+            for cut in range(1, len(hello)):
+                self.assertEqual(gate.tunnel_name(hello[:cut], True), (False, None))
+                self.assertEqual(await gate.tunnel_opening(self.Fragments([hello[:cut], hello[cut:]]), True), (hello, name))
+            self.assertEqual(await gate.tunnel_opening(self.Fragments([bytes([b]) for b in hello]), True), (hello, name))
+        alerted = b"\x15\x03\x03\x00\x02\x01\x5a" + client_hello("example.com")
+        for cut in range(1, len(alerted)):
+            with self.assertRaises(ValueError):
+                await gate.tunnel_opening(self.Fragments([alerted[:cut], alerted[cut:]]), True)
 
 
 class IPv6FallbackTests(unittest.TestCase):

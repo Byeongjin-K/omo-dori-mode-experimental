@@ -687,47 +687,17 @@ def client_hello_name(data: bytes) -> tuple[bool, str | None]:
     return True, name
 
 
-HTTP_TOKEN = rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+"
-
-
-def http_request_name(data: bytes) -> tuple[bool, str | None]:
-    """tunnel_name for a tunnel that must show the gate its name, past a TLS record: a strict HTTP/1 origin-form
-    request (one SP between its three parts, CRLF lines, token: value fields) and nothing else. Any other bytes,
-    other protocols and every looser request shape a lenient server might still take included, are refused as soon as
-    the first line is in."""
-    end = data.find(b"\r\n\r\n")
-    head = data if end < 0 else data[:end + 4]  # the body after the head is not read
-    if re.search(rb"(?<!\r)\n|\r(?!\n|\Z)|[^\t\r\n -~]", head):  # bare LF or CR (a CR may end the bytes so far), controls
-        raise ValueError("http-request")
-    line_end = data.find(b"\r\n")
-    if line_end < 0:
-        return False, None
-    if not re.fullmatch(HTTP_TOKEN + rb" (/[!-~]*|\*) HTTP/1\.[01]", data[:line_end]):
-        raise ValueError("http-request")
-    if end < 0:
-        return False, None
-    lines = data[:end].split(b"\r\n")
-    hosts = []
-    for line in lines[1:]:
-        key, colon, value = line.partition(b":")
-        if not colon or not re.fullmatch(HTTP_TOKEN, key):
-            raise ValueError("http-request")
-        if key.lower() == b"host":
-            hosts.append(value)
-    if len(hosts) > 1:
-        raise ValueError("http-request")
-    return True, tunnel_host(hosts[0].decode("latin1")) if hosts else None
-
-
 def tunnel_name(data: bytes, strict: bool) -> tuple[bool, str | None]:
     """The name the first client bytes of a tunnel ask for. (False, None) while more bytes are needed; ValueError for
     an opening refused unread. A TLS record (any content type, version 3) must start a ClientHello: its SNI, or None.
-    Past that, a strict tunnel (one no named connect_allow entry vouches for) must be a strict HTTP/1 request: its
-    Host, or None; any other protocol is refused. A tunnel to a named entry passes other bytes opaque: (True, None).
+    A strict tunnel (one no named connect_allow entry vouches for) must be TLS: anything else is refused at its first
+    byte. A tunnel to a named entry passes other bytes opaque: (True, None).
 
-    2026-11-16 (reviews 1 and 2 of #486): sorting "HTTP-looking" bytes from "other protocols" leaked each time (an
-    alert before the ClientHello, a VT or extra space in the request line) and stalled real text protocols (EHLO, SSH
-    comments). So the line is drawn by who vouches for the host, never by the shape of the bytes."""
+    2026-11-16 (reviews 1-3 of #486): sorting "HTTP-looking" bytes from "other protocols" leaked each time (an alert
+    before the ClientHello, a VT or extra space in the request line) and stalled real text protocols (EHLO, SSH
+    comments), and a checked Host covers only the first request on a kept-alive connection. So the line is drawn by
+    who vouches for the host, never by the shape of the bytes, and a tunnel nobody vouches for speaks TLS, whose one
+    ClientHello names the host for the whole connection."""
     if not data:
         return False, None
     if 0x14 <= data[0] <= 0x17:
@@ -737,7 +707,7 @@ def tunnel_name(data: bytes, strict: bool) -> tuple[bool, str | None]:
             return client_hello_name(data)
     if not strict:
         return True, None
-    return http_request_name(data)
+    raise ValueError("tunnel-not-tls")
 
 
 async def tunnel_opening(reader, strict: bool) -> tuple[bytes, str | None]:

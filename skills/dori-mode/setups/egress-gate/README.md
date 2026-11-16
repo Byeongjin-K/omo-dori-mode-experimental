@@ -41,21 +41,18 @@ gate demands depends on who vouches for the host, never on how the bytes look:
   stays the same: name check, public DNS, dial, then `200`. Bytes other than
   TLS pass opaque: any protocol, server-first ones, SSH, SMTP, or plain HTTP.
 - **A name only `"*"` admits.** No owner choice vouches for this host, so the
-  tunnel must show the gate a name it can read:
-  - a ClientHello, with or without SNI;
-  - or a strict HTTP/1 origin-form request: single spaces, CRLF lines, token
-    fields, one `Host` at most, no control bytes.
-
-  Anything else is refused as soon as its first line is in
-  (`connect-sni-unreadable`), because a lenient server might still read it as a
-  request for another host. Other protocols need a named entry.
+  tunnel must speak TLS: it opens with a ClientHello, with or without SNI, and
+  that one handshake names the host for the whole connection. Anything else is
+  refused at its first byte (`connect-sni-unreadable`). That includes plain
+  HTTP, because a checked `Host` covers only the first request on a kept-alive
+  connection. Other protocols, plain HTTP among them, need a named entry.
 - **CONNECT to an address that only `"*"` admits.** This covers any numeric spelling, such as
   `162.159.128.233`, `0xa2.0x9f.0x80.0xe9` or `1572395042`. An address names no
-  host, so the gate answers `200` and dials nothing until the first bytes name a
-  host. That name must pass the rules, and its public DNS answer must hold that
-  very address. Otherwise the tunnel closes and nothing is dialed:
-  - no SNI or Host, or an address as the name: `connect-sni-required`
-  - an unreadable ClientHello or request, or nothing within 30 s: `connect-sni-unreadable`
+  host, so the gate answers `200` and dials nothing until a ClientHello's SNI
+  names a host. That name must pass the rules, and its public DNS answer must
+  hold that very address. Otherwise the tunnel closes and nothing is dialed:
+  - no SNI, or an address as the SNI: `connect-sni-required`
+  - not TLS, an unreadable ClientHello, or nothing within 30 s: `connect-sni-unreadable`
   - a refused name: `connect-host-denied`
   - an address the name does not resolve to: `connect-sni-address-mismatch`
 
@@ -66,6 +63,8 @@ gate demands depends on who vouches for the host, never on how the bytes look:
 Two things stay out of reach, because the gate never decrypts the tunnel: a
 Host header inside TLS that differs from the SNI (domain fronting, which the
 major CDNs refuse), and Encrypted Client Hello, whose inner SNI is encrypted.
+The gate reads only the first ClientHello. RFC 8446 requires the second one,
+sent after a HelloRetryRequest, to repeat it, SNI included.
 What a named host does with the bytes it is sent, a plain `Host` included,
 rests on the owner's choice of that host, as it did before `"*"`.
 
