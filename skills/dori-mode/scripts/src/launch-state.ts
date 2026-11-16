@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { forwardEnv, laneEnv } from "./aoe.ts";
-import { listAoeSessions } from "./sessions.ts";
+import { aoeRefForLane, listAoeSessions } from "./sessions.ts";
 import { isHerdrPane, paneRef } from "./herdr.ts";
 import { isHcPane } from "./hc-pane.ts";
 import type { FlowDeps } from "./done-flow.ts";
@@ -44,7 +44,14 @@ const paneOwned = async (deps: FlowDeps, pane: string): Promise<{ readonly owned
 // https://github.com/sisyphuslabs/dori-superagent/pull/230): the brief is on disk, it carries the Done line the done
 // protocol reads, and the pane is dori's. A foreign pane, a swarm's or a person's, would otherwise get lane messages.
 // validateLaunch checks the rest, as for a launch.
-export const adoptLane = async (deps: FlowDeps, input: LaunchInput & { readonly pane: string }): Promise<Lane> => {
+// A pane id that names no runtime (no hc:, no <ws>:<pane>, no aoe tmux name) is a session on the runtime new lanes open
+// on, as `dori boot` prints it: on hc it is hc:<id>, never the tmux reading (upstream #223, issue #222,
+// https://github.com/sisyphuslabs/dori-superagent/pull/223); the ownership check then runs on that address.
+const adoptedPane = (deps: FlowDeps, pane: string): string =>
+  isHcPane(pane) || isHerdrPane(pane) || aoeRefForLane(pane) || deps.config.backend === "aoe" || runtimesOf(deps.run, deps.config).choice?.kind !== "hc" ? pane : `hc:${pane}`;
+
+export const adoptLane = async (deps: FlowDeps, given: LaunchInput & { readonly pane: string }): Promise<Lane> => {
+  const input = { ...given, pane: adoptedPane(deps, given.pane) };
   await validateLaunch(deps, input);
   const brief = Bun.file(resolve(input.brief));
   if (!(await brief.exists())) throw new LaunchError(`brief not found: ${input.brief}`);
