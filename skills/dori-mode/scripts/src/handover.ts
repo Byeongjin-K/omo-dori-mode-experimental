@@ -30,7 +30,7 @@ import { flat, missingHeadings, quoted, ROUND_TRIES } from "./restatement.ts";
 import { appendRollover, approvalProblem, autoReason, type Candidate, clearQuiet, COMMITTED, decidedBy, filledApproval, inboxMessages, measuredSignal, LEAD_PREFIX, lastProposal, limitsFor, ownerQuotes, ownerRolloverText, readRollovers, reportToOwner, rolloverCause, sessionFile, type Signals, sessionSignals, setQuiet, type Step, type Supplement, takeAutoGrant, userLines } from "./rollover.ts";
 import { turnRunning } from "./submit.ts";
 import { watchLog } from "./watch-log.ts";
-import { Worklog, worklogLines } from "./worklog.ts";
+import { type WorklogFacts, worklogFacts, worklogSection } from "./worklog-notes.ts";
 
 export type HandoverDeps = FlowDeps & Pick<FreezeDeps, "procs"> & {
   readonly signal: (pid: number, sig: Sig | "SIGTERM" | "SIGKILL") => boolean;
@@ -103,7 +103,7 @@ export type HandoverFacts = {
   readonly watchers: readonly HandoverWatcher[];
   readonly cards: readonly Question[];
   readonly todos: readonly string[];
-  // the lead's open owner requests from dori worklog (upstream dori-superagent#96), one OPEN line each with its Next line
+  // the lead's open owner requests from dori worklog (upstream dori-superagent#96), one OPEN line each with its Next line and newest NOTE lines (worklog-notes.ts)
   readonly worklog?: WorklogFacts;
   readonly goal?: string | undefined;
   readonly timers: readonly string[];
@@ -118,21 +118,6 @@ export type HandoverFacts = {
 
 // the newest quotes the note carries
 const QUOTES_MAX = 60;
-
-export type WorklogFacts = { readonly markdown: string; readonly open: number; readonly lines: readonly string[] };
-
-// Upstream https://github.com/sisyphuslabs/dori-superagent/pull/96 lists these in dori boot, which this fork does not have:
-// here the new lead reads them in its handover note. A damaged or unreadable record is named, never a refusal.
-export const worklogFacts = (stateDir: string): WorklogFacts => {
-  const log = new Worklog(stateDir);
-  try {
-    const read = log.read();
-    const [, ...open] = worklogLines(read.items);
-    return { markdown: log.markdownPath, open: open.length, lines: [...open, ...read.problems.map((p) => `WORKLOG damaged ${p}`), ...read.warnings.map((w) => `WORKLOG warning ${w}`)] };
-  } catch (error) {
-    return { markdown: log.markdownPath, open: 0, lines: [`WORKLOG unreadable ${log.path}: ${error instanceof Error ? error.message : String(error)}`] };
-  }
-};
 
 // The summary the old lead writes before it is replaced (dori handover --note FILE; dori handover --template prints the
 // headings): what only its conversation knows.
@@ -438,7 +423,7 @@ export const renderNote = (f: HandoverFacts, at: string): string => [
   `2. A line with ${PROBE} <id>, typed into this session or arriving as an inbox event, is a check of this handover: run the dori handover ack command the line gives (with its --state) and nothing else.`,
   `3. A [LEAD] HANDOVER_SUPPLEMENT <id> line comes from the audit after the commit: it names a file with what you were missing and the old log lines behind it; write those items into the file it names (create it if it is not there), keep them in mind as the note's, and run the ack command it gives. No restatement is asked before the commit.`,
   `4. Until a [LEAD] ${COMMITTED} line arrives answer no one, act on no event and change nothing besides that file and your todo list: the handover can still roll back. The old session stays quiet meanwhile and is closed once the checks pass.`,
-  `5. After ${COMMITTED}, carry on: open lanes, owner questions, todos, open worklog items (each from its Next line, and keep it with dori worklog next|note|close), timers, promised follow-ups and the old lead's notes; answer the owner where his last messages left off. A [LEAD] HANDOVER_SUPPLEMENT line that comes later is the audit after the handover: do what it says and go on. When you or a lane find later that an old session knew something its handover did not carry and it cost something (asking again, redoing, guessing), run dori handover gap <lane key or lead> --kind "<owner's words|decision|lead instruction|todo|goal|monitor|tried fix|other>" --text "<one line, no secret values>".`,
+  `5. After ${COMMITTED}, carry on: open lanes, owner questions, todos, open worklog items (each from its Next and NOTE lines: a NOTE may hold a promise to someone, keep it; and keep it with dori worklog next|note|close), timers, promised follow-ups and the old lead's notes; answer the owner where his last messages left off. A [LEAD] HANDOVER_SUPPLEMENT line that comes later is the audit after the handover: do what it says and go on. When you or a lane find later that an old session knew something its handover did not carry and it cost something (asking again, redoing, guessing), run dori handover gap <lane key or lead> --kind "<owner's words|decision|lead instruction|todo|goal|monitor|tried fix|other>" --text "<one line, no secret values>".`,
   "",
   `## Monitors (${f.monitors.length})`,
   ...(f.monitors.length ? f.monitors.map(monitorLine) : ["none"]),
@@ -456,7 +441,7 @@ export const renderNote = (f: HandoverFacts, at: string): string => [
   "",
   "## Todos left in the old session",
   ...(f.todos.length ? f.todos.map((t) => `- ${t}`) : ["none"]),
-  ...(f.worklog ? ["", `## Open worklog items (${f.worklog.open}, dori worklog list --open; ${f.worklog.markdown})`, ...(f.worklog.lines.length ? f.worklog.lines.map((l) => `- ${l}`) : ["none"])] : []),
+  ...worklogSection(f.worklog),
   ...(f.goal ? ["", "## Goal of the old session", f.goal] : []),
   "",
   "## Timers and reminders",

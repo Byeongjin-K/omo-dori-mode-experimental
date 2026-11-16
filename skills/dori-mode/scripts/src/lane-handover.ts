@@ -35,6 +35,7 @@ import { appendRollover, type OwnerMessage, ownerMessagesFor, approvalProblem, a
 import { stuckTop } from "./explore.ts";
 import { bulletsIn, covered, flat, type Missing, missingHeadings, quoted, quotesIn, section, wholeBullet } from "./restatement.ts";
 import { watchLog } from "./watch-log.ts";
+import { type WorklogFacts, worklogFacts, worklogSection } from "./worklog-notes.ts";
 
 export type LaneHandoverDeps = FlowDeps & {
   // a process's /proc stat (job-control.ts readStat when not given)
@@ -106,6 +107,7 @@ export type LaneFacts = {
   readonly account?: string;
   readonly monitors: readonly MonitorSpec[];
   readonly todos: readonly string[];
+  readonly worklog?: WorklogFacts;
   readonly goal?: string | undefined;
   readonly chains: readonly Job[];
   readonly detached: readonly Job[];
@@ -455,7 +457,7 @@ export const renderLaneNote = (f: LaneFacts, at: string, stateDir: string): stri
   "",
   ...(f.goal ? ["## Goal", f.goal, ""] : []),
   "## Todos",
-  ...(f.todos.length ? f.todos.map((t) => `- ${t}`) : ["none"]),
+  ...(f.todos.length ? f.todos.map((t) => `- ${t}`) : ["none"]), ...worklogSection(f.worklog),
   "",
   `## Local chains of the old session (${f.chains.length})`,
   ...(f.chains.length ? ["Do NOT start these again now: they still run under the old session until it closes, and a second copy would run the same work twice (duplicate node jobs, results written over). Once the old session is closed and these pids are gone, a [LEAD] HANDOVER_CHAINS_ENDED line tells you; then restart only what is still needed, from its checkpoint or progress files, skipping steps that already finished.", ...f.chains.map(job)] : ["none"]),
@@ -866,7 +868,7 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
   const leadWords = leadLines(userLines(oldLog), Date.parse(since) || 0);
   const facts: LaneFacts = {
     lane, from: { pane: lane.pane, aoeId: old.id, session, title: old.title, cwd: old.path }, cwd: real, model: splitModel(model).base, thinking, ...(shown.contextPct !== undefined ? { contextPct: shown.contextPct } : {}), ...(shown.account ? { account: shown.account } : {}),
-    monitors, todos: session ? openTodos(sessionDir, session) : [], goal: session ? openGoal(sessionDir, session) : undefined, chains, detached, ...(jobs.length ? { work: jobs } : {}), ...(ready ? { ready } : {}), laneNote, signals, ...(opts.approvedBy?.trim() ? { approvedBy: opts.approvedBy.trim() } : {}),
+    monitors, todos: session ? openTodos(sessionDir, session) : [], worklog: worklogFacts(config.stateDir), goal: session ? openGoal(sessionDir, session) : undefined, chains, detached, ...(jobs.length ? { work: jobs } : {}), ...(ready ? { ready } : {}), laneNote, signals, ...(opts.approvedBy?.trim() ? { approvedBy: opts.approvedBy.trim() } : {}),
     agentPid: agent.pid, ...(sessionFile(sessionDir, session) ? { oldLog: sessionFile(sessionDir, session) } : {}),
     ownerMessages: ownerMessagesFor({ inbox: deps.inbox ?? "", ownerIds: deps.ownerIds ?? [], oldLog: sessionFile(sessionDir, session), thread: lane.thread.startsWith("discord:") ? lane.thread.slice("discord:".length) : undefined, since, guild: process.env["DORI_DISCORD_GUILD"]?.trim() }),
     ...(leadWords.length ? { leadWords } : {}),

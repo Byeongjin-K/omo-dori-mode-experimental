@@ -2,6 +2,10 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
+import { promiseLines } from "./worklog-promise.ts";
+import { type Event, isTorn, parseEvent, WorklogError } from "./worklog-record.ts";
+
+export { WorklogError };
 
 export type WorklogItem = {
   readonly id: string;
@@ -13,47 +17,11 @@ export type WorklogItem = {
   readonly closedAt?: string;
   readonly result?: string;
 };
-type Event =
-  | { readonly op: "add"; readonly id: string; readonly at: string; readonly title: string; readonly source: string }
-  | { readonly op: "next"; readonly id: string; readonly at: string; readonly text: string }
-  | { readonly op: "note"; readonly id: string; readonly at: string; readonly text: string }
-  | { readonly op: "close"; readonly id: string; readonly at: string; readonly result: string };
 /** problems are damage; warnings are the normal results of racing writers that are still worth naming. */
 export type WorklogRead = { readonly items: WorklogItem[]; readonly problems: string[]; readonly warnings: string[] };
-export class WorklogError extends Error {}
 
 /** First line of a worklog.md this module wrote. A file without it is someone's notes and is never replaced. */
 export const WORKLOG_MARKER = "<!-- written by dori worklog from worklog.jsonl; change it with the command -->";
-
-const ID = /^[0-9a-f]{8}$/;
-// C0 and C1 controls (C1 holds U+0085 NEL and the CSI \x9b), DEL, and the Unicode line and paragraph separators.
-const singleLine = (value: unknown, max: number): value is string =>
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: the pattern deliberately matches control characters to reject or strip them
-  typeof value === "string" && value.trim().length > 0 && value.length <= max && !/[\x00-\x1f\x7f-\x9f\u2028\u2029]/.test(value);
-const isoTime = (value: unknown): value is string =>
-  typeof value === "string" && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
-
-const parseEvent = (value: unknown): Event => {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new WorklogError("worklog record must be a JSON object");
-  const record = value as Record<string, unknown>;
-  if (typeof record["id"] !== "string" || !ID.test(record["id"])) throw new WorklogError('worklog field "id" must be 8 lowercase hex digits');
-  if (!isoTime(record["at"])) throw new WorklogError('worklog field "at" must be an ISO time as toISOString writes it');
-  const fields: Record<string, Record<string, number>> = { add: { title: 200, source: 400 }, next: { text: 1000 }, note: { text: 1000 }, close: { result: 1000 } };
-  // Fork change (review of orientpine#352): only the four ops themselves; an inherited name (toString, __proto__) is no op.
-  const wanted = typeof record["op"] === "string" && Object.hasOwn(fields, record["op"]) ? fields[record["op"]] : undefined;
-  if (!wanted) throw new WorklogError('worklog field "op" must be add, next, note or close');
-  const unknown = Object.keys(record).find((name) => !["op", "id", "at", ...Object.keys(wanted)].includes(name));
-  if (unknown !== undefined) throw new WorklogError(`unknown worklog field "${unknown}"`);
-  for (const [name, max] of Object.entries(wanted)) {
-    if (!singleLine(record[name], max)) throw new WorklogError(`worklog field "${name}" must be one nonempty line of at most ${max} characters`);
-  }
-  return record as Event;
-};
-
-// Every record is JSON.stringify of an event built op first, so it starts with this.
-const RECORD_START = '{"op":"';
-/** A line that does not parse but begins like a record is a write cut off halfway: harmless, and skipped quietly. */
-const isTorn = (line: string): boolean => line.startsWith(RECORD_START) || RECORD_START.startsWith(line);
 
 const ownedOrAbsent = (path: string): boolean =>
   !existsSync(path) || readFileSync(path, "utf8").split("\n", 1)[0] === WORKLOG_MARKER;
@@ -115,9 +83,16 @@ export class Worklog {
     return this.write({ op: "note", id, at: new Date(now).toISOString(), text: text.trim() });
   }
 
-  close(id: string, result: string, now: number): WorklogItem {
-    this.openItem(id);
-    return this.write({ op: "close", id, at: new Date(now).toISOString(), result: result.trim() });
+  // Fork change (worklog da078c1a): a note or Next line that reads as a promise (promiseLines) stops it, unless acknowledged.
+  // The record decides (fold): a close with ack false is ignored when the item holds a promise at its place, so a promise
+  // note another writer appends between this check and the append stops it too (review 1 of #483).
+  close(id: string, result: string, now: number, opts: { readonly ackPromise?: boolean } = {}): WorklogItem {
+    const refusal = (item: WorklogItem) => new WorklogError([...promiseLines(item).map((line) => `WORKLOG_CLOSE_PROMISE ${id} ${line}`), `WORKLOG_CLOSE_REFUSED ${id}: the line above reads as a promise still owed; keep it or hand it on, then close again with --ack-promise`].join("\n"));
+    const item = this.openItem(id);
+    if (!opts.ackPromise && promiseLines(item).length) throw refusal(item);
+    const closed = this.write({ op: "close", id, at: new Date(now).toISOString(), result: result.trim(), ack: Boolean(opts.ackPromise) });
+    if (closed.closedAt === undefined) throw refusal(closed);
+    return closed;
   }
 
   private openItem(id: string): WorklogItem {
@@ -159,6 +134,7 @@ export class Worklog {
         }
         if (event.op === "next") items.set(event.id, { ...item, next: event.text });
         else if (event.op === "note") items.set(event.id, { ...item, notes: [...item.notes, { at: event.at, text: event.text }] });
+        else if (event.op === "close" && event.ack === false && promiseLines(item).length) warnings.push(`${this.path}:${index + 1}: worklog item ${event.id} close without --ack-promise ignored: a note or its Next reads as a promise`);
         else if (event.op === "close") items.set(event.id, { ...item, closedAt: event.at, result: event.result });
       } catch (error) {
         if (!(error instanceof WorklogError)) throw error;
@@ -233,10 +209,14 @@ export const renderWorklog = (items: readonly WorklogItem[]): string => {
   return `${WORKLOG_MARKER}\n# Worklog\n\n${section("Open", open)}\n${section("Closed", closed)}`;
 };
 
+/** One open item as dori boot and a handover note show it. */
+export const openLine = (item: WorklogItem): string =>
+  `OPEN ${item.id} ${JSON.stringify(item.title)} source=${JSON.stringify(item.source)} next=${JSON.stringify(item.next ?? "")}`;
+
 export const worklogLines = (items: readonly WorklogItem[]): string[] => {
   const open = items.filter((item) => item.closedAt === undefined);
   return [
     `WORKLOG open=${open.length}`,
-    ...open.map((item) => `OPEN ${item.id} ${JSON.stringify(item.title)} source=${JSON.stringify(item.source)} next=${JSON.stringify(item.next ?? "")}`),
+    ...open.map(openLine),
   ];
 };
