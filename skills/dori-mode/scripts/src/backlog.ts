@@ -16,7 +16,7 @@ import { intakeBrief } from "./backlog-pair.ts";
 import type { BacklogSettings } from "./config.ts";
 import { doneSyntaxErrors } from "./done-signals.ts";
 import { LANE_KEY, type Lane, NO_THREAD, statusOf, threadRefProblem } from "./registry.ts";
-import { sharedDirProblem } from "./shared-dir.ts";
+import { dirProblem, sharedDirProblem } from "./shared-dir.ts";
 
 export type ItemStatus = "open" | "running" | "done" | "dropped";
 export type ItemLog = { readonly at: string; readonly what: string };
@@ -157,6 +157,7 @@ export const addItem = (stateDir: string, input: AddInput, ctx: { readonly regis
   const priority = input.priority === undefined ? 5 : Number(input.priority);
   if (!Number.isInteger(priority) || priority < 1 || priority > 9) throw new BacklogError(`--priority must be 1 (first) to 9 (last), not ${input.priority}`);
   if (!existsSync(input.brief)) throw new BacklogError(`no brief file ${input.brief}`);
+  const cwdProblem = input.cwd ? dirProblem(resolve(input.cwd)) : undefined; if (cwdProblem) throw new BacklogError(`--cwd ${resolve(input.cwd ?? "")} ${cwdProblem}`); // now, not when a pass starts the lane there hours later (upstream #245, https://github.com/sisyphuslabs/dori-superagent/pull/245)
   const doneErrors = doneSyntaxErrors(input.done);
   if (doneErrors.length) throw new BacklogError(`Done line is not checkable: ${doneErrors.join("; ")}`);
   if (input.noThread !== undefined && !input.noThread.trim()) throw new BacklogError(`--no-thread needs the reason the lane has no work thread`);
@@ -192,7 +193,6 @@ export const addItem = (stateDir: string, input: AddInput, ctx: { readonly regis
     ...(input.ownerLink ? { ownerLink: input.ownerLink } : {}),
     ...((input.row ?? (replaced ? old?.row : undefined)) ? { row: input.row ?? old?.row } : {}),
     ...((input.todo ?? (replaced ? old?.todo : undefined)) ? { todo: input.todo ?? old?.todo } : {}),
-
     // what the feed recorded stays when the lead replaces the item (the fix of a held one)
     ...((input.followUpOf ?? (replaced ? old?.followUpOf : undefined)) ? { followUpOf: input.followUpOf ?? old?.followUpOf } : {}),
     // the feed's state (source, content, approval) is the feed's: a lead's replacement keeps it, and the write limit a
