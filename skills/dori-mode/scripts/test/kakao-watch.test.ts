@@ -137,12 +137,12 @@ test("Kakao watcher environment sets ids, mention, paths and intervals; nothing 
     rooms: "/s/kakao-rooms.json",
     cursors: "/s/kakao-cursors.json",
     marked: "/s/kakao-markread.json",
-    gaveUp: "/s/kakao-markread-giveup.json",
+    gaveUp: "/s/kakao-markread-giveup.json", expired: "/s/kakao-auth-expired.json",
     syncDir: join(homedir(), ".config", "agent-messenger"),
     inbox: "/i",
     pollMs: 5,
     sweepMs: 6,
-    discoverMs: 7,
+    discoverMs: 7, authFails: 3,
   });
   const off = kakaoOptions({ DORI_STATE_DIR: "/st", DORI_DISCORD_INBOX: "/d/inbox.jsonl" });
   expect([off.self, off.cli, off.rooms, off.inbox, off.pollMs, off.sweepMs, off.discoverMs]).toEqual(["", "agent-messenger", "/st/kakao-rooms.json", "/d/inbox.jsonl", 8000, 300000, 20000]);

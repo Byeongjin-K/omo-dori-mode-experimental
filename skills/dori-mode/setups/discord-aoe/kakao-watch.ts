@@ -1,8 +1,9 @@
 #!/usr/bin/env bun
 // KakaoTalk watcher for a Dori with its own Kakao account (agent-messenger kakaotalk). Off unless DORI_KAKAO_SELF_ID is set.
 // Polls every known room, appends new messages to the inbox, prints one KAKAO_MSG line each for the lead's monitor and
-// marks them read. --once performs one tick and exits; --mark-read <chat> <log id> is the one-session mark a tick runs.
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
+// marks them read. --once performs one tick and exits; --mark-read <chat> <log id> is the one-session mark a tick runs;
+// --refresh renews the stored login with its refresh token, as a tick runs it once the login has expired.
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { envFilePath, loadEnvFile, resolveInstance } from "../../scripts/src/config.ts";
@@ -20,11 +21,13 @@ export type KakaoOptions = {
   readonly cursors: string;
   readonly marked: string;
   readonly gaveUp: string;
+  readonly expired: string;
   readonly syncDir: string;
   readonly inbox: string;
   readonly pollMs: number;
   readonly sweepMs: number;
   readonly discoverMs: number;
+  readonly authFails: number;
 };
 // cursors: newest log id taken into the inbox; marked: newest log id a mark-read succeeded for. They differ while a
 // mark-read is pending, failed (retried at retryAt, backing off) or re-armed by a sweep. gaveUp: the log id whose mark
@@ -42,6 +45,12 @@ export type KakaoState = {
   unread: Set<string>;
   lastSweep: number;
   lastDiscover: number;
+  // -950 replies in a row; whether this run of them already had its one refresh; the login file stamp the login
+  // expired at (null: not expired), saved in kakao-auth-expired.json so a restart with the same login stays idle.
+  authFails: number;
+  refreshed: boolean;
+  expiredLogin: string | null;
+  waitNoted: boolean;
 };
 type KMsg = { log_id: string; author_id: number | string | { low: number; high: number }; author_name?: string; message: string | null; sent_at: number };
 type KChat = { chat_id: string; type?: string | number; display_name?: string; unread_count?: number };
@@ -74,11 +83,13 @@ export const kakaoOptions = (env: Record<string, string | undefined>): KakaoOpti
     cursors: join(dir, "kakao-cursors.json"),
     marked: join(dir, "kakao-markread.json"),
     gaveUp: join(dir, "kakao-markread-giveup.json"),
+    expired: join(dir, "kakao-auth-expired.json"),
     syncDir: env["AGENT_MESSENGER_CONFIG_DIR"] || join(homedir(), ".config", "agent-messenger"),
     inbox: env["DORI_KAKAO_INBOX"] || env["DORI_DISCORD_INBOX"] || join(stateDir, "discord", "inbox.jsonl"),
     pollMs: positive(env["DORI_KAKAO_POLL_MS"], 8000),
     sweepMs: positive(env["DORI_KAKAO_SWEEP_MS"], 300_000),
     discoverMs: positive(env["DORI_KAKAO_DISCOVER_MS"], 20_000),
+    authFails: positive(env["DORI_KAKAO_AUTH_FAILS"], 3),
   };
 };
 
@@ -111,7 +122,21 @@ export const loadKakaoState = (o: KakaoOptions): KakaoState => {
     unread: new Set(Object.values(rooms).map((r) => String(r.id))),
     lastSweep: -Infinity,
     lastDiscover: -Infinity,
+    authFails: 0,
+    refreshed: false,
+    expiredLogin: readJson<{ login?: string } | null>(o.expired, null)?.login ?? null,
+    waitNoted: false,
   };
+};
+
+// The server's answer to a login whose access token is no longer valid (agent-messenger protocol/login-response.js).
+const INVALID_TOKEN = /invalid access token \(status -950\)/;
+// The login file agent-messenger writes only when it signs in or refreshes; its mtime and size tell a new login.
+const loginStamp = (o: KakaoOptions): string => {
+  const file = join(o.syncDir, "kakaotalk-credentials.json");
+  if (!existsSync(file)) return "none";
+  const st = statSync(file);
+  return `${st.mtimeMs}:${st.size}`;
 };
 
 const oneLine = (r: Ran, max: number) => (r.err || r.out).slice(0, max).replace(/\n/g, " ");
@@ -201,10 +226,41 @@ export async function markReadConfirmed(open: OpenSession, long: (id: string) =>
   return { status, watermark: (await open(readMark)).mark };
 }
 
-// The agent-messenger SDK the CLI ships with (its CLI has no sync or read-back), found next to the resolved CLI script.
+// The agent-messenger SDK the CLI ships with (its CLI has no sync, read-back or refresh), found next to the resolved CLI
+// script.
+const kakaoSdk = (o: KakaoOptions): string => join(dirname(realpathSync(Bun.which(o.cli) ?? o.cli)), "platforms", "kakaotalk", "index.js");
+
+export type RefreshBack = { ok: true } | { ok: false; why: string };
+type StoredAccount = { account_id?: unknown; oauth_token?: string; refresh_token?: string; device_uuid?: string };
+export type KakaoAuthSdk = {
+  CredentialManager: new () => {
+    getAccount(): Promise<StoredAccount | null>;
+    setAccount(account: StoredAccount & { updated_at: string }): Promise<void>;
+    setCurrentAccount(id: unknown): Promise<void>;
+    clearPendingLogin(): Promise<void>;
+  };
+  refreshKakaoOAuthToken(input: { accessToken: string | undefined; refreshToken: string; deviceUuid: string }): Promise<{ accessToken: string; refreshToken: string }>;
+};
+// The refresh that brought the login back on 2026-11-17 (the relogin lane's kakao-relogin.ts refresh): agent-messenger
+// exports refreshKakaoOAuthToken but never calls it, so an expired access token stays expired. Says why, never a token.
+export async function refreshLogin(mod: KakaoAuthSdk): Promise<RefreshBack> {
+  const manager = new mod.CredentialManager();
+  const account = await manager.getAccount();
+  if (!account?.refresh_token || !account.device_uuid) return { ok: false, why: "no_refresh_token" };
+  try {
+    const renewed = await mod.refreshKakaoOAuthToken({ accessToken: account.oauth_token, refreshToken: account.refresh_token, deviceUuid: account.device_uuid });
+    await manager.setAccount({ ...account, oauth_token: renewed.accessToken, refresh_token: renewed.refreshToken, updated_at: new Date().toISOString() });
+    await manager.setCurrentAccount(account.account_id);
+    await manager.clearPendingLogin();
+    return { ok: true };
+  } catch (error) {
+    const e = error as { code?: string; serverStatus?: number; httpStatus?: number };
+    return { ok: false, why: `${e.code ?? "error"} server=${e.serverStatus ?? "-"} http=${e.httpStatus ?? "-"}` };
+  }
+}
+
 async function markReadOnce(o: KakaoOptions, chatId: string, logId: string, from: string): Promise<MarkBack> {
-  const cli = realpathSync(Bun.which(o.cli) ?? o.cli);
-  const sdk = join(dirname(cli), "platforms", "kakaotalk", "index.js");
+  const sdk = kakaoSdk(o);
   const mod = await import(sdk);
   const { Long } = mod.Long ? mod : await import(Bun.resolveSync("bson", dirname(sdk)));
   const open: OpenSession = async (fn) => {
@@ -237,8 +293,66 @@ const noteType = (o: KakaoOptions, s: KakaoState, name: string, type: string, lo
   if (NO_READ_MARK_TYPES.has(type)) log(`KAKAO_MARKREAD_SKIP ${name} ${room.id} ${type}: the server keeps no read mark in this room type, it is not marked read`);
 };
 
+// After authFails -950 replies in a row a tick runs --refresh once; when that fails, or the refreshed login gets authFails
+// more, the watcher stops calling KakaoTalk (more logins with a dead token risk the account being restricted) and stays
+// up without polling until the login file changes: exiting would only make systemd (Restart=always) start it again.
+// One KAKAO_AUTH_EXPIRED line and one inbox row per expired login; a restart with that login prints KAKAO_AUTH_WAIT.
+async function authReply(o: KakaoOptions, s: KakaoState, r: Ran, runner: Runner, now: () => number, log: (line: string) => void): Promise<boolean> {
+  if (r.code === 0) {
+    s.authFails = 0;
+    s.refreshed = false;
+    return false;
+  }
+  if (!INVALID_TOKEN.test(`${r.err}\n${r.out}`)) return false;
+  s.authFails += 1;
+  if (s.authFails < o.authFails) return false;
+  const n = s.authFails;
+  let why = "the refreshed login got -950 again";
+  if (!s.refreshed) {
+    s.refreshed = true;
+    const rr = await runner(["flock", o.lock, process.execPath, import.meta.path, "--refresh"], { timeoutMs: 60_000 });
+    const back = rr.code === 0 ? parseRefreshBack(rr.out) : null;
+    if (back?.ok) {
+      s.authFails = 0;
+      log(`KAKAO_AUTH_REFRESHED after ${n} invalid access token replies in a row: polling goes on`);
+      return false;
+    }
+    why = back ? back.why : `refresh did not run: ${oneLine(rr, 150)}`;
+  }
+  s.expiredLogin = loginStamp(o);
+  s.waitNoted = true;
+  const ts = new Date(now()).toISOString();
+  save(o.expired, { login: s.expiredLogin, at: ts });
+  const line = `KAKAO_AUTH_EXPIRED after ${n} invalid access token replies in a row, refresh failed (${why}): polling stopped until the login file changes`;
+  log(line);
+  const content = `${line}. The watcher makes no KakaoTalk call until someone signs the account in again as root; it then polls again by itself. Pass this on in the pair channel to the Dori that handles the KakaoTalk login.`;
+  appendFileSync(o.inbox, `${JSON.stringify({ ts, id: `kakao-auth-expired-${ts}`, kind: "kakao-auth-expired", content })}\n`);
+  return true;
+}
+
+const parseRefreshBack = (out: string): RefreshBack | null => {
+  try {
+    const j = JSON.parse(out) as RefreshBack;
+    return j.ok === true ? { ok: true } : j.ok === false && typeof j.why === "string" ? j : null;
+  } catch {
+    return null;
+  }
+};
+
 export async function kakaoTick(o: KakaoOptions, s: KakaoState, runner: Runner, now: () => number, log: (line: string) => void): Promise<void> {
   pruneKakaoProof(s.proofRecords, now() / 1000);
+  if (s.expiredLogin !== null) {
+    if (loginStamp(o) === s.expiredLogin) {
+      if (!s.waitNoted) log("KAKAO_AUTH_WAIT the login expired and its file has not changed since: not polling");
+      s.waitNoted = true;
+      return;
+    }
+    s.expiredLogin = null;
+    s.authFails = 0;
+    s.refreshed = false;
+    rmSync(o.expired, { force: true });
+    log("KAKAO_AUTH_RESUMED the login file changed: polling again");
+  }
   // Every call holds the account's lock: two agent-messenger logins on one device evict each other.
   const kakao = (args: string[], timeoutMs: number) => runner(["flock", o.lock, o.cli, "kakaotalk", ...args], { timeoutMs });
 
@@ -247,6 +361,7 @@ export async function kakaoTick(o: KakaoOptions, s: KakaoState, runner: Runner, 
     const r = await kakao(["chat", "list", "--all"], 90_000);
     const chats = r.code === 0 ? parseList<KChat>(r.out, "chats") : null;
     if (r.code !== 0) log(`KAKAO_DISCOVER_FAIL ${oneLine(r, 150)}`);
+    if (await authReply(o, s, r, runner, now, log)) return;
     const known = new Map(Object.entries(s.rooms).map(([name, v]) => [String(v.id), name]));
     for (const c of chats ?? []) {
       // chat list returns only chats changed since the account's last sync, so an unread count here is a hint, not a census.
@@ -286,10 +401,9 @@ export async function kakaoTick(o: KakaoOptions, s: KakaoState, runner: Runner, 
 
   for (const [name, { id }] of Object.entries(s.rooms)) {
     const r = await kakao(["message", "list", id, "-n", "15"], 60_000);
-    if (r.code !== 0) {
-      log(`KAKAO_POLL_FAIL ${id} ${oneLine(r, 200)}`);
-      continue;
-    }
+    if (r.code !== 0) log(`KAKAO_POLL_FAIL ${id} ${oneLine(r, 200)}`);
+    if (await authReply(o, s, r, runner, now, log)) return;
+    if (r.code !== 0) continue;
     const msgs = parseList<KMsg>(r.out, "messages");
     if (!msgs) {
       log(`KAKAO_PARSE_FAIL ${id}`);
@@ -390,6 +504,10 @@ if (import.meta.main) {
   const at = process.argv.indexOf("--mark-read");
   if (at >= 0) {
     console.log(JSON.stringify(await markReadOnce(options, process.argv[at + 1] ?? "", process.argv[at + 2] ?? "", process.argv[at + 3] ?? "0")));
+    process.exit(0);
+  }
+  if (process.argv.includes("--refresh")) {
+    console.log(JSON.stringify(await refreshLogin(await import(kakaoSdk(options)))));
     process.exit(0);
   }
   for (const file of [options.rooms, options.inbox]) mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
