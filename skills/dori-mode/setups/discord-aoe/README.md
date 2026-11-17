@@ -103,7 +103,7 @@ One `KEY=VALUE` per line, `#` comments, absolute paths (neither systemd nor the 
 | `DORI_FILE_RELAY_DORIS`, `DORI_FILE_RELAY_MAX_BYTES`, `DORI_FILE_RELAY_SETTLE_SEC`, `DORI_FILE_RELAY_INTERVAL`, `DORI_FILE_RELAY_MAX_DEPTH` | no | no | Files between Dori accounts on a host (step 4): the Dori accounts and their lead inboxes (the service needs two or more), the size cap (100 MiB), how long a file must stay unchanged (10 s), the scan interval (10 s) and how many folders deep a file may sit (12); read by `dori-file-relay` on the host that may `sudo -n -u` the others |
 | `DORI_GOOGLE_ACCOUNT`, `DORI_GOOGLE_EVENTS`, `DORI_GOOGLE_STATE`, `DORI_GOOGLE_INTERVAL_MS`, `DORI_GOOGLE_WINDOW_MIN`, `DORI_GOOGLE_TIME_ZONE` | no | no | Google mail and calendar watcher; it runs when its unit `dori-google-watch` is enabled, these only tune it ([table](#google-mail-and-calendar)) |
 | `DORI_KAKAO_SELF_ID` | no | no | Turns the KakaoTalk watcher on (unset: `KAKAO_WATCH_OFF`) |
-| `DORI_KAKAO_OWNER_ID`, `DORI_KAKAO_MENTION`, `DORI_KAKAO_STATE_DIR`, `DORI_KAKAO_INBOX`, `DORI_KAKAO_CLI`, `DORI_KAKAO_POLL_MS`, `DORI_KAKAO_SWEEP_MS`, `DORI_KAKAO_DISCOVER_MS` | no | no | Tune the KakaoTalk watcher ([table](#kakaotalk)) |
+| `DORI_KAKAO_OWNER_ID`, `DORI_KAKAO_MENTION`, `DORI_KAKAO_STATE_DIR`, `DORI_KAKAO_INBOX`, `DORI_KAKAO_CLI`, `DORI_KAKAO_POLL_MS`, `DORI_KAKAO_SWEEP_MS`, `DORI_KAKAO_DISCOVER_MS`, `DORI_KAKAO_AUTH_FAILS` | no | no | Tune the KakaoTalk watcher ([table](#kakaotalk)) |
 | `DORI_KAKAO_ACCOUNT_FILE`, `DORI_KAKAO_DEVICE_TYPE` | no | the file it names is | Login only (`kakao-login.ts`); the password lives in that separate 0600 file, never in `dori.env` |
 | `DORI_USAGE_DIR`, `DORI_USAGE_SNAP_DIR` | no | no | Usage screenshot ([below](#usage-screenshot)) |
 | `DORI_SLACK_TOKEN`, `DORI_SLACK_COOKIE`, `DORI_TELEGRAM_TOKEN` | no | yes | Other messengers: `dori send slack\|telegram`, `dori presence`, `dori inbound slack\|telegram` |
@@ -303,12 +303,13 @@ you are signed in. `DORI_KAKAO_DEVICE_TYPE` (default `tablet`) picks the second-
 | `DORI_KAKAO_SELF_ID` | unset: the watcher is off | The account's own Kakao user id; its own messages are not taken in |
 | `DORI_KAKAO_OWNER_ID` | none | The owner's Kakao user ids, comma-separated; their rows get `author_kind: "owner"`. In an open chat (오픈채팅) the owner writes as that room's open profile, a different id: add it only after the owner confirms it is his. Kakao's server sets the author id, so another member cannot write as it |
 | `DORI_KAKAO_MENTION` | none | Case-insensitive regex of the Dori's names; sets `mentions_self` on a row |
-| `DORI_KAKAO_STATE_DIR` | `<DORI_STATE_DIR or ~/.dori/state>` | `kakao-rooms.json`, `kakao-cursors.json`, `kakao-markread.json`, `kakao-markread-giveup.json`, `kakao.lock` |
+| `DORI_KAKAO_STATE_DIR` | `<DORI_STATE_DIR or ~/.dori/state>` | `kakao-rooms.json`, `kakao-cursors.json`, `kakao-markread.json`, `kakao-markread-giveup.json`, `kakao-auth-expired.json`, `kakao.lock` |
 | `DORI_KAKAO_INBOX` | `DORI_DISCORD_INBOX`, else `<DORI_STATE_DIR or ~/.dori/state>/discord/inbox.jsonl` | Inbox the rows go to |
 | `DORI_KAKAO_CLI` | `agent-messenger` | The CLI, always run as `flock <state dir>/kakao.lock <cli> kakaotalk ...`; read marks use the agent-messenger SDK installed beside it |
 | `DORI_KAKAO_POLL_MS` | `8000` | Pause between two polls of all rooms |
 | `DORI_KAKAO_SWEEP_MS` | `300000` | Mark-read sweep interval |
 | `DORI_KAKAO_DISCOVER_MS` | `20000` | New-room discovery interval |
+| `DORI_KAKAO_AUTH_FAILS` | `3` | `invalid access token (status -950)` replies in a row before the one refresh, and again before polling stops (below) |
 | `DORI_KAKAO_PROOF_SOCKET` | `dori-kakao-proof` | Linux abstract Unix attestation socket; `off` disables it. Normal watch only, never `--once` or `--mark-read` |
 | `DORI_KAKAO_ACCOUNT_FILE`, `DORI_KAKAO_DEVICE_TYPE` | none, `tablet` | Login only |
 
@@ -319,6 +320,7 @@ you are signed in. `DORI_KAKAO_DEVICE_TYPE` (default `tablet`) picks the second-
 - **Rooms with no read mark.** A KakaoTalk channel (room type `PlusChat`, such as the "카카오계정" room the account's notices come from) keeps no read mark the watcher can move, so it is never marked read; its messages still come in. The type comes from `chat list` or from the CHATONROOM the mark reads first, never from a room id; it is saved in `kakao-rooms.json` and the room gets one `KAKAO_MARKREAD_SKIP <room> <chat id> <type>: ...` line.
 - **Open chats.** In an open chat (CHATONROOM type `OM` or `OD`) the server takes a NOTIREAD only with the room's link id. The mark session reads it from CHATINFO, which leaves the read state alone, and sends it as `li`; other rooms send no `li`. An open chat whose CHATINFO has no link id is a `KAKAO_MARKREAD_FAIL` and marks nothing. The account joins an open chat in the official app (agent-messenger has no join command); after that the watcher lists, reads and marks it like any room.
 - **Sweeps.** At start every room is marked once more (a miss from before a restart is remembered nowhere else); after that a sweep marks again only a room `chat list` showed unread whose marked log id the server was not seen to confirm in this run. A room with a confirmed mark sends nothing until a newer message, so `KAKAO_MARKREAD_OK` comes once per log id, and once more per room after a restart. `chat list` returns only chats changed since the account's last sync: its unread counts are a hint, and an empty list does not mean nothing is unread.
+- **Expired login.** agent-messenger never renews the access token itself, so once it expires every call answers `KakaoTalk LOGINLIST invalid access token (status -950)` (2026-11-17 07:49Z: 138 `KAKAO_POLL_FAIL` lines in 2 min 20 s until the owner stopped the unit as root; more logins with a dead token risk the account being restricted). After `DORI_KAKAO_AUTH_FAILS` such replies in a row (chat list and message list; any success starts the count over, any other failure is neither counted nor reset) the watcher runs `kakao-watch.ts --refresh` once under the lock: the stored refresh token through the SDK's `refreshKakaoOAuthToken`, saved back as the current account (what brought the login back on 2026-11-17, `KAKAO_RELOGIN_OK via=refresh`). It works: `KAKAO_AUTH_REFRESHED after <n> invalid access token replies in a row: polling goes on`. It fails, or the refreshed login gets as many -950 again: one `KAKAO_AUTH_EXPIRED after <n> invalid access token replies in a row, refresh failed (<why>): polling stopped until the login file changes` line and one inbox row `{ts,id,kind:"kakao-auth-expired",content}`, and from then on no KakaoTalk call at all. The process stays up (the proof socket too) instead of exiting, because `Restart=always` would start it again every 10 s and log in again. `kakao-auth-expired.json` keeps the login file's stamp (mtime and size of `kakaotalk-credentials.json`, never its content), so a restart with the same login prints `KAKAO_AUTH_WAIT ...` once and calls nothing, with no second alert. When that file changes (a new login or a refresh as root), the next tick prints `KAKAO_AUTH_RESUMED the login file changed: polling again` and polls.
 - **One login at a time.** Two agent-messenger calls on one device evict each other's session. Anything else that uses the account (sending, uploads) takes the same lock: `flock <state dir>/kakao.lock agent-messenger kakaotalk ...`.
 
 Run it as a persistent monitor in the Dori's own session (see "The Dori's monitors"); its output is the notification.
@@ -352,7 +354,8 @@ stdin (plain regular files only, at most 30 and 300 MB), so no path the watcher 
 as root with `install.sh install --relay-user <user> --bundle <dir> --env-from <relay dori.env>`, then `install.sh login`
 (asks for the KakaoTalk login and password on that terminal; signing in again on the same device slot ends the old
 session) and `install.sh start` (waits for `KAKAO_PROOF_READY`). The relay Dori then watches
-`tail -n 0 -F /var/lib/dori-kakao-out/watch.log` through its alert filter instead of running the watcher, and its
+`tail -n 0 -F /var/lib/dori-kakao-out/watch.log` through its alert filter (it must pass `KAKAO_AUTH_EXPIRED`; the
+watcher's unit cannot reach any other Dori, so the relay Dori passes it on in the pair channel) instead of running the watcher, and its
 `dori.env` points `DORI_KAKAO_INBOX` at `/var/lib/dori-kakao-out/inbox.jsonl` with `DORI_KAKAO_SELF_ID` removed.
 
 ### Slack as a bot
@@ -590,7 +593,7 @@ In the Dori's own session, arm these as persistent monitors (`references/setup.m
 | sessions waiting on a human | `tail -n 0 -F ~/.dori/state/session-events.jsonl` | `^\{` |
 | lane sweeps | `tail -n 0 -F ~/.dori/dori-lanes.log` | `LANE_\|DEAD_PANE\|HOST_GUARD ALERT\|HOST_GUARD HEAVY_OUTSIDE\|NUDGED\|LEAD-TOLD\|NO-REPORT\|FAIL\|STUCK\|INTENT_CHECK\|ROLLOVER_\|RESEARCH_NOT_STARTED\|NOT_SUBMITTED\|SAME_FIX` |
 | listener health | `tail -n 0 -F ~/.dori/inbound.log ~/.dori/session-watch.log` | `FATAL\|_FAIL\|SESSION-WATCH-FAIL` |
-| KakaoTalk (only with `DORI_KAKAO_SELF_ID`) | `PATH=/absolute/node/bin:$PATH bun <fork>/skills/dori-mode/setups/discord-aoe/kakao-watch.ts` | `KAKAO_(MSG\|NEW_ROOM\|WATCH_OFF\|[A-Z_]*FAIL)` |
+| KakaoTalk (only with `DORI_KAKAO_SELF_ID`) | `PATH=/absolute/node/bin:$PATH bun <fork>/skills/dori-mode/setups/discord-aoe/kakao-watch.ts` | `KAKAO_(MSG\|NEW_ROOM\|WATCH_OFF\|AUTH_EXPIRED\|[A-Z_]*FAIL)` |
 | Slack as a bot (only with `DORI_SLACK_APP_TOKEN`, or `--wait` until it is set) | `bun <fork>/skills/dori-mode/setups/discord-aoe/slack-watch.ts --wait` | `SLACK_(MSG\|WATCH_OFF\|WATCH_READY\|[A-Z_]*FAIL)` |
 
 `DISCORD_LISTENER_CLOSED` alone is not worth a ping: the gateway asks for reconnects several times a day. Only alert when no `DISCORD_LISTENER_READY` follows within a minute.
