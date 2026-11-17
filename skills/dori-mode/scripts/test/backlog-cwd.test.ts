@@ -26,6 +26,7 @@ test("add refuses a --cwd that is missing or a file and stores nothing; a real d
   expect(() => add("c1", join(root, "gone"))).toThrow(BacklogError);
   expect(() => add("c1", join(root, "gone"))).toThrow(`--cwd ${join(root, "gone")} is not a directory`);
   expect(() => add("c1", brief)).toThrow(`--cwd ${brief} is not a directory`);
+  expect(() => add("c1", join(brief, "child"))).toThrow(`--cwd ${join(brief, "child")} is not a directory`);
   expect(readItem(state, "c1")).toBeUndefined();
   mkdirSync(join(root, "repo"));
   expect(add("c2", join(root, "repo", "..", "repo")).cwd).toBe(join(root, "repo"));
