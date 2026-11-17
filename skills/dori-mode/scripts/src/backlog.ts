@@ -8,7 +8,7 @@
 // The idea is dori-superagent's hourly loop (#23, https://github.com/sisyphuslabs/dori-superagent/pull/23, MIT), rewritten
 // here for aoe and dori launch: no GitHub issue import (owner 2026-11-02 23:14 KST "github 이슈는 필요없고"), the start goes
 // through the same launch as the lead's (directives, eight steps, work thread), and it never merges, pushes or closes.
-import { appendFileSync, chmodSync, closeSync, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 
@@ -157,6 +157,7 @@ export const addItem = (stateDir: string, input: AddInput, ctx: { readonly regis
   const priority = input.priority === undefined ? 5 : Number(input.priority);
   if (!Number.isInteger(priority) || priority < 1 || priority > 9) throw new BacklogError(`--priority must be 1 (first) to 9 (last), not ${input.priority}`);
   if (!existsSync(input.brief)) throw new BacklogError(`no brief file ${input.brief}`);
+  if (input.cwd && !statSync(resolve(input.cwd), { throwIfNoEntry: false })?.isDirectory()) throw new BacklogError(`--cwd ${resolve(input.cwd)} is not a directory`); // now, not when a pass starts the lane there hours later (upstream #245, https://github.com/sisyphuslabs/dori-superagent/pull/245)
   const doneErrors = doneSyntaxErrors(input.done);
   if (doneErrors.length) throw new BacklogError(`Done line is not checkable: ${doneErrors.join("; ")}`);
   if (input.noThread !== undefined && !input.noThread.trim()) throw new BacklogError(`--no-thread needs the reason the lane has no work thread`);
@@ -192,7 +193,6 @@ export const addItem = (stateDir: string, input: AddInput, ctx: { readonly regis
     ...(input.ownerLink ? { ownerLink: input.ownerLink } : {}),
     ...((input.row ?? (replaced ? old?.row : undefined)) ? { row: input.row ?? old?.row } : {}),
     ...((input.todo ?? (replaced ? old?.todo : undefined)) ? { todo: input.todo ?? old?.todo } : {}),
-
     // what the feed recorded stays when the lead replaces the item (the fix of a held one)
     ...((input.followUpOf ?? (replaced ? old?.followUpOf : undefined)) ? { followUpOf: input.followUpOf ?? old?.followUpOf } : {}),
     // the feed's state (source, content, approval) is the feed's: a lead's replacement keeps it, and the write limit a
