@@ -7,7 +7,7 @@ import { type Lane, type RolloverDue, statusOf } from "./registry.ts";
 import { fixTag, recordFix } from "./same-fix.ts";
 import { taskOpen, taskRecord } from "./background.ts";
 import { laneBackground } from "./lane-wait.ts";
-import { ON_DUTY_MARKS } from "./aoe.ts";
+import { onDuty } from "./duty-line.ts";
 import { waitingRequest } from "./lane-handover.ts";
 import { readRollovers } from "./rollover.ts";
 import { auditDue, weeklyDue, writeMarker } from "./rollover-audit.ts";
@@ -81,11 +81,8 @@ export const freshnessTick = async (deps: FlowDeps, home: string, given: Rollove
       return undefined;
     });
     if (jobs?.length) return jobs.map((j) => `${j.kind}:${j.id}`).join(",");
-    // the status lines under omo's input line; the same words in the transcript above it are history
-    const lines = Bun.stripANSI(screen).split("\n");
-    const status = lines.slice(lines.findLastIndex((l) => l.trimStart().startsWith("❯")) + 1).join("\n");
-    const mark = lines.some((l) => l.trimStart().startsWith("❯")) ? ON_DUTY_MARKS.find((m) => status.includes(m)) : undefined;
-    return mark ? `screen:${mark.trim()}` : undefined;
+    const mark = onDuty(screen);
+    return mark ? `screen:${mark}` : undefined;
   };
   const readProgress = async (lane: Lane): Promise<{ readonly previous: Progress | null; readonly progress: Progress | null; readonly report: string | null; readonly error: ReportError | null }> => {
     if (lane.reportProtocol !== "jsonl-v1") return { previous: null, progress: null, report: await lastReport(lane), error: null };

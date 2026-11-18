@@ -169,7 +169,7 @@ export const taskRecords = (home: string, session: string): TaskRecord[] => {
       }
       if (!text.includes(session)) continue;
       const r = parseRecord(file, text);
-      if (r && (r.parent === session || r.root === session)) out.push({ id: r.id, status: r.status, file: r.file, ...(r.at ? { at: r.at } : {}), ...(r.what ? { what: r.what } : {}), ...(r.host !== undefined ? { host: r.host } : {}), ...(r.mode ? { mode: r.mode } : {}) });
+      if (r && (r.parent === session || r.root === session)) out.push({ id: r.id, status: r.status, file: r.file, ...(r.at ? { at: r.at } : {}), ...(r.ended ? { ended: r.ended } : {}), ...(r.what ? { what: r.what } : {}), ...(r.host !== undefined ? { host: r.host } : {}), ...(r.mode ? { mode: r.mode } : {}) });
     }
   }
   return out;

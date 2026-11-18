@@ -4,8 +4,9 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { paneActivity } from "../src/aoe.ts";
 import { laneBackground } from "../src/lane-wait.ts";
-import { depsFor, fakeClock, newWorld, withState, type World } from "./fakes.ts";
+import { depsFor, fakeClock, fakeRunner, newWorld, withState, type World } from "./fakes.ts";
 
 const T0 = Date.parse("2026-01-01T12:00:00.000Z");
 const ID = "99999999-9999-4999-8999-999999999999";
@@ -45,10 +46,13 @@ test("the lane session's task that senpi's record says still runs counts, and no
 
 test("a dori heavy run under the lane's shell or in the lane's folder counts once per run, and not another folder's", async () => {
   world.ps = `${AGENT}\n12 10 timeout 3600 /home/u/.dori/bin/dori heavy fullcpu2 --kind cpu --local -- bash ./run.sh\n13 12 bun /home/u/.bun/bin/dori heavy fullcpu2 --kind cpu --local -- bash ./run.sh`;
-  expect((await laneBackground(run(), sessions, PANE, "/tmp/w"))?.map((j) => `${j.kind}:${j.id}`)).toEqual(["heavy:12"]);
+  expect((await laneBackground(run(), sessions, PANE, "/tmp/w"))?.map((j) => `${j.kind}:${j.id}`)).toEqual(["heavy:13"]);
   // words that only name the command (a shell line that runs it later, a QA pane 2026-11-18) are no run and hide no child
   world.ps = `${AGENT.replace("/bin/bash /dev/fd/4", "bash -c printf x; /home/u/.dori/bin/dori heavy fullcpu2 -- ./run.sh; sleep 900")}\n12 10 /bin/bash /home/u/.dori/bin/dori heavy fullcpu2 -- ./run.sh`;
   expect((await laneBackground(run(), sessions, PANE, "/tmp/w"))?.map((j) => `${j.kind}:${j.id}`)).toEqual(["heavy:12"]);
+  // nor a shell whose -c string starts with it once that run ended: its program is bash (review 2 of #507)
+  world.ps = AGENT.replace("/bin/bash /dev/fd/4", "bash -c dori heavy prep -- true; omo --model m; sleep 900");
+  expect(await laneBackground(run(), sessions, PANE, "/tmp/w")).toEqual([]);
   // nor is an agent whose prompt (herdr puts the lane's goal in its command line) says to use dori heavy
   world.ps = AGENT.replace("--session-id", "ulw. big tests go through dori heavy fullcpu --kind cpu -- --session-id");
   expect(await laneBackground(run(), sessions, PANE, "/tmp/w")).toEqual([]);
@@ -71,4 +75,16 @@ test("a running task's record started before notBefore is not what the lane wait
   const home = join(state.dir, "home");
   taskFile(home, "st_old", "running", T0 - 3 * 3_600_000);
   expect(await laneBackground(run(), sessions, PANE, "/tmp/w", Number.POSITIVE_INFINITY, T0 - 3_600_000, home)).toEqual([]);
+});
+
+test("a task known only from its senpi record that ended after the caller's cutoff still counts for it", async () => {
+  const home = join(state.dir, "home");
+  taskFile(home, "st_rec", "completed", T0, T0 + 50_000);
+  expect((await laneBackground(run(), sessions, PANE, "/tmp/w", T0 + 30_000, 0, home))?.map((j) => j.id)).toEqual(["st_rec"]);
+  expect(await laneBackground(run(), sessions, PANE, "/tmp/w", T0 + 60_000, 0, home)).toEqual([]);
+});
+
+test("the watch reads omo's duty line under the input line only: the same words above it are history", async () => {
+  world.screens = { "w1:p1": "the child said: 1 task on duty\n❯ ", "w1:p2": "❯ \n  ◆ e7 · 1 task on duty" };
+  expect([...(await paneActivity(fakeRunner(world), ["w1:p1", "w1:p2"]))]).toEqual([["w1:p1", "idle"], ["w1:p2", "running"]]);
 });

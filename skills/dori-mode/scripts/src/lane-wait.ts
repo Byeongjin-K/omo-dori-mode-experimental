@@ -4,17 +4,17 @@ import { homedir } from "node:os";
 import { tmuxPanePid } from "./aoe.ts";
 import { type BackgroundJob, pendingBackground, pidAlive, restoredMonitors, sessionFile, taskOpen, type TaskRecord, taskRecord, taskRecords } from "./background.ts";
 import type { Runner } from "./run.ts";
-import { descendants, type Proc, procTable } from "./session-id.ts";
+import { agentArgv, descendants, type Proc, procTable } from "./session-id.ts";
 
 // A dori heavy run (queued, running here or sent to a helper: its dori heavy process lives until the result is back) is the
 // lane's when the pane's shell runs it or it runs in the lane's folder (started with nohup or setsid, it leaves the shell's
-// tree). It is the process whose program is dori (or its cli.ts) with the verb heavy, under at most two wrapper words
-// (bun, bash, timeout 3600): words that only name it (a shell line that runs it later, an agent's prompt) are none. One per run:
-// the outermost of the lane's own. A run a child task started belongs to that task's host and counts through the task.
-const isHeavy = (cmd: string): boolean => {
-  const words = cmd.trim().split(/\s+/);
-  return words.slice(0, 3).some((w, i) => /(?:^|\/)(?:dori|cli\.ts)$/.test(w) && words[i + 1] === "heavy");
-};
+// tree). It is told from the process's own argv (/proc cmdline, never the ps text): the program is dori (or its cli.ts) with
+// the verb heavy, run directly or as the script of bun, node, bash or sh. A shell's -c string, a wrapper's arguments (timeout
+// 3600 dori heavy: its child is the run) and an agent's prompt only name it. One per run: the outermost of the lane's own. A run
+// a child task started belongs to that task's host and counts through the task.
+const PROGRAM = /(?:^|\/)(?:dori|cli\.ts)$/;
+const isHeavy = (argv: readonly string[]): boolean =>
+  (PROGRAM.test(argv[0] ?? "") && argv[1] === "heavy") || (/(?:^|\/)(?:bun|node|bash|sh)$/.test(argv[0] ?? "") && PROGRAM.test(argv[1] ?? "") && argv[2] === "heavy");
 const cwdOf = (pid: number): string | undefined => {
   try {
     return readlinkSync(`/proc/${pid}/cwd`);
@@ -22,26 +22,27 @@ const cwdOf = (pid: number): string | undefined => {
     return undefined;
   }
 };
-const heavyRuns = (table: readonly Proc[], shell: number, cwd: string): BackgroundJob[] => {
+const heavyRuns = async (run: Runner, table: readonly Proc[], shell: number, cwd: string): Promise<BackgroundJob[]> => {
   const under = new Set(shell ? [shell, ...descendants(table, shell).map((p) => p.pid)] : []);
   const inFolder = (pid: number): boolean => {
     const at = cwd ? cwdOf(pid) : undefined;
     return at !== undefined && (at === cwd || at.startsWith(`${cwd}/`));
   };
-  const own = table.filter((p) => isHeavy(p.cmd) && (under.has(p.pid) || inFolder(p.pid)));
+  const own: Proc[] = [];
+  for (const p of table) if (p.cmd.includes(" heavy") && (under.has(p.pid) || inFolder(p.pid)) && isHeavy((await agentArgv(run, p.pid, p.cmd)) ?? [])) own.push(p);
   const ids = new Set(own.map((p) => p.pid));
   return own.filter((p) => !ids.has(p.ppid)).map((p) => ({ kind: "heavy" as const, id: String(p.pid), at: 0 }));
 };
 
 // What an idle lane still waits on, for the blocked check (done-flow.ts BG_WAITING) and freshness (no STALLED beside it):
 // the jobs its transcript started and did not end by until (a task whose senpi record says it ended by then is not one), the
-// tasks of its session senpi's record says still run (host alive, started in the same window; a task of the shared task host,
+// tasks of its session senpi's record says still run or ended after until (host alive, started in the same window; a task of the shared task host,
 // mode process, outlives an agent restart), and its dori heavy runs. Jobs started before the agent process
 // started died with the earlier process; jobs started before notBefore (a server or watcher left running for hours) are not
 // what the lane waits on. undefined when the lane's session cannot be read and no heavy run is its.
 export const laneBackground = async (run: Runner, sessionsDir: string, pane: string, cwd: string, until = Number.POSITIVE_INFINITY, notBefore = 0, home = homedir()): Promise<BackgroundJob[] | undefined> => {
   const table = await procTable(run);
-  const heavy = heavyRuns(table, await tmuxPanePid(run, pane), cwd);
+  const heavy = await heavyRuns(run, table, await tmuxPanePid(run, pane), cwd);
   const file = await sessionFile(run, sessionsDir, pane, cwd, table);
   if (!file) return heavy.length ? heavy : undefined;
   const started = Date.parse((await run(["ps", "-o", "lstart=", "-p", String(file.pid)])).out.trim());
@@ -49,12 +50,14 @@ export const laneBackground = async (run: Runner, sessionsDir: string, pane: str
     const r = j.kind === "task" ? taskRecord(home, j.id) : undefined;
     return !r || taskOpen(r) || (r.ended !== undefined && Date.parse(r.ended) > until);
   });
+  // still running (host alive), or ended after until: the caller's snapshot still has it (blockedTick reads 45 s back)
+  const pending = (r: TaskRecord): boolean => (taskOpen(r) ? r.host === undefined || pidAlive(r.host) : r.ended !== undefined && Date.parse(r.ended) > until);
   const inWindow = (r: TaskRecord): boolean => {
     const at = Date.parse(r.at ?? "");
     return at >= notBefore && at <= until && (r.mode === "process" || Number.isNaN(started) || at >= started);
   };
   const id = /_([^_]+)\.jsonl$/.exec(file.path)?.[1];
-  const tasks = id ? taskRecords(home, id).filter((r) => taskOpen(r) && inWindow(r) && (r.host === undefined || pidAlive(r.host)) && !jobs.some((j) => j.id === r.id)) : [];
+  const tasks = id ? taskRecords(home, id).filter((r) => pending(r) && inWindow(r) && !jobs.some((j) => j.id === r.id)) : [];
   const restored = id && !Number.isNaN(started) ? restoredMonitors(sessionsDir, cwd, id, started) : [];
   return [...jobs, ...tasks.map((r) => ({ kind: "task" as const, id: r.id, at: Date.parse(r.at ?? "") || 0 })), ...restored.map((m) => ({ kind: "monitor" as const, id: `restored:${m.description}`, at: 0 })), ...heavy];
 };
