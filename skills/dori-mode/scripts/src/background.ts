@@ -114,7 +114,7 @@ export const pendingBackground = (transcript: string, since = 0, until = Number.
 // st_01a17b36 on 2026-10-27, run 38 after 37 completions) still runs although the transcript shows it ended.
 // host: the process that runs it (host_pid): the session's own agent for an in-process task, the account's shared task host
 // (omo --mode rpc --multi-session) for one in execution mode "process"
-export type TaskRecord = { readonly id: string; readonly status: string; readonly file: string; readonly at?: string; readonly what?: string; readonly host?: number; readonly mode?: string };
+export type TaskRecord = { readonly id: string; readonly status: string; readonly file: string; readonly at?: string; readonly ended?: string; readonly what?: string; readonly host?: number; readonly mode?: string };
 
 // senpi's task statuses are pending, running, paused, completed, error, cancelled, interrupted and lost; the first three
 // have not ended
@@ -130,7 +130,7 @@ const taskDirs = (home: string): string[] => {
   }
 };
 
-type RawRecord = { readonly task_id?: string; readonly status?: string; readonly started_at?: string; readonly created_at?: string; readonly task_summary?: string; readonly parent_session_id?: string; readonly root_session_id?: string; readonly host_pid?: number | null; readonly execution_mode?: string };
+type RawRecord = { readonly task_id?: string; readonly status?: string; readonly started_at?: string; readonly created_at?: string; readonly task_summary?: string; readonly parent_session_id?: string; readonly root_session_id?: string; readonly host_pid?: number | null; readonly execution_mode?: string; readonly terminal_at?: string };
 
 const parseRecord = (file: string, text: string): (TaskRecord & { readonly parent?: string; readonly root?: string }) | undefined => {
   let r: RawRecord;
@@ -141,7 +141,7 @@ const parseRecord = (file: string, text: string): (TaskRecord & { readonly paren
   }
   const id = r.task_id ?? file.slice(file.lastIndexOf("/") + 1, -".json".length);
   const at = r.started_at ?? r.created_at;
-  return { id, status: r.status ?? "", file, ...(at ? { at } : {}), ...(r.task_summary ? { what: r.task_summary } : {}), ...(typeof r.host_pid === "number" ? { host: r.host_pid } : {}), ...(r.execution_mode ? { mode: r.execution_mode } : {}), ...(r.parent_session_id ? { parent: r.parent_session_id } : {}), ...(r.root_session_id ? { root: r.root_session_id } : {}) };
+  return { id, status: r.status ?? "", file, ...(at ? { at } : {}), ...(r.terminal_at ? { ended: r.terminal_at } : {}), ...(r.task_summary ? { what: r.task_summary } : {}), ...(typeof r.host_pid === "number" ? { host: r.host_pid } : {}), ...(r.execution_mode ? { mode: r.execution_mode } : {}), ...(r.parent_session_id ? { parent: r.parent_session_id } : {}), ...(r.root_session_id ? { root: r.root_session_id } : {}) };
 };
 
 // The record of one task, under any project; undefined when senpi keeps none.

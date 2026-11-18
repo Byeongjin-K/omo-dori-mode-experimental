@@ -73,7 +73,7 @@ export const freshnessTick = async (deps: FlowDeps, home: string, given: Rollove
   // What a quiet lane at its prompt waits on (GongDori's e7-e2e-plan-exec on a child task, STALLED every two minutes on
   // 2026-11-18): senpi's records, the transcript and the process table first (lane-wait.ts laneBackground, the blocked
   // check's reading), with the same age window (work started blockedWaitMin before its last report, a server left running, does
-  // not count); omo's duty line on the screen when those cannot be read or show nothing.
+  // not count); omo's duty line under the input line when those cannot be read or show nothing.
   const waitingOn = async (lane: Lane, screen: string, progress: Progress): Promise<string | undefined> => {
     const since = Date.parse(progress.lastReport?.at ?? progress.lastEvent.at) - deps.config.blockedWaitMin * 60_000;
     const jobs = await laneBackground(deps.run, deps.config.sessionsDir, lane.pane ?? "", lane.cwd ?? "", now, since, home).catch((e: unknown) => {
@@ -81,7 +81,10 @@ export const freshnessTick = async (deps: FlowDeps, home: string, given: Rollove
       return undefined;
     });
     if (jobs?.length) return jobs.map((j) => `${j.kind}:${j.id}`).join(",");
-    const mark = ON_DUTY_MARKS.find((m) => Bun.stripANSI(screen).includes(m));
+    // the status lines under omo's input line; the same words in the transcript above it are history
+    const lines = Bun.stripANSI(screen).split("\n");
+    const status = lines.slice(lines.findLastIndex((l) => l.trimStart().startsWith("❯")) + 1).join("\n");
+    const mark = lines.some((l) => l.trimStart().startsWith("❯")) ? ON_DUTY_MARKS.find((m) => status.includes(m)) : undefined;
     return mark ? `screen:${mark.trim()}` : undefined;
   };
   const readProgress = async (lane: Lane): Promise<{ readonly previous: Progress | null; readonly progress: Progress | null; readonly report: string | null; readonly error: ReportError | null }> => {

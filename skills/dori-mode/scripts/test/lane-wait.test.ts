@@ -2,7 +2,7 @@
 // ("1 task on duty") and on a dori heavy run, 2026-11-18, and freshness called it STALLED every two minutes. senpi's task record
 // and the process table say so, whatever the transcript or screen shows.
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { laneBackground } from "../src/lane-wait.ts";
 import { depsFor, fakeClock, newWorld, withState, type World } from "./fakes.ts";
@@ -29,10 +29,10 @@ beforeEach(() => {
 });
 afterEach(() => state.done());
 
-const taskFile = (home: string, id: string, status: string) => {
+const taskFile = (home: string, id: string, status: string, startedAt = T0, terminalAt?: number) => {
   const dir = join(home, ".omo", "agent", "projects", "p", "senpi-task", "tasks");
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, `${id}.json`), JSON.stringify({ task_id: id, status, parent_session_id: ID, started_at: new Date(T0).toISOString() }));
+  writeFileSync(join(dir, `${id}.json`), JSON.stringify({ task_id: id, status, parent_session_id: ID, started_at: new Date(startedAt).toISOString(), ...(terminalAt ? { terminal_at: new Date(terminalAt).toISOString() } : {}) }));
 };
 
 test("the lane session's task that senpi's record says still runs counts, and not once the record says it ended", async () => {
@@ -46,11 +46,29 @@ test("the lane session's task that senpi's record says still runs counts, and no
 test("a dori heavy run under the lane's shell or in the lane's folder counts once per run, and not another folder's", async () => {
   world.ps = `${AGENT}\n12 10 timeout 3600 /home/u/.dori/bin/dori heavy fullcpu2 --kind cpu --local -- bash ./run.sh\n13 12 bun /home/u/.bun/bin/dori heavy fullcpu2 --kind cpu --local -- bash ./run.sh`;
   expect((await laneBackground(run(), sessions, PANE, "/tmp/w"))?.map((j) => `${j.kind}:${j.id}`)).toEqual(["heavy:12"]);
-  // the pane's own command line names the run (a QA pane, 2026-11-18): it is the lane's, not a stranger that hides its child
+  // words that only name the command (a shell line that runs it later, a QA pane 2026-11-18) are no run and hide no child
   world.ps = `${AGENT.replace("/bin/bash /dev/fd/4", "bash -c printf x; /home/u/.dori/bin/dori heavy fullcpu2 -- ./run.sh; sleep 900")}\n12 10 /bin/bash /home/u/.dori/bin/dori heavy fullcpu2 -- ./run.sh`;
-  expect((await laneBackground(run(), sessions, PANE, "/tmp/w"))?.map((j) => `${j.kind}:${j.id}`)).toEqual(["heavy:10"]);
+  expect((await laneBackground(run(), sessions, PANE, "/tmp/w"))?.map((j) => `${j.kind}:${j.id}`)).toEqual(["heavy:12"]);
+  // nor is an agent whose prompt (herdr puts the lane's goal in its command line) says to use dori heavy
+  world.ps = AGENT.replace("--session-id", "ulw. big tests go through dori heavy fullcpu --kind cpu -- --session-id");
+  expect(await laneBackground(run(), sessions, PANE, "/tmp/w")).toEqual([]);
   // started with nohup or setsid it leaves the shell's tree; its folder still ties it to the lane
   world.ps = `${AGENT}\n${process.pid} 1 bun /home/u/.bun/bin/dori heavy apart --kind cpu -- true`;
   expect((await laneBackground(run(), sessions, PANE, process.cwd()))?.map((j) => `${j.kind}:${j.id}`)).toEqual([`heavy:${process.pid}`]);
   expect(await laneBackground(run(), sessions, PANE, "/tmp/w")).toEqual([]);
+});
+
+test("a task that ended after the caller's cutoff still counts for that cutoff; one that ended before it does not", async () => {
+  const home = join(state.dir, "home");
+  const transcript = join(sessions, "--tmp-w--", `2026-01-01T12-00-01-000Z_${ID}.jsonl`);
+  appendFileSync(transcript, `${JSON.stringify({ type: "message", timestamp: new Date(T0 + 1000).toISOString(), message: { role: "toolResult", toolName: "task", content: "started", details: { run_in_background: true, task_id: "st_0e2e", status: "running" } } })}\n`);
+  taskFile(home, "st_0e2e", "completed", T0, T0 + 50_000);
+  expect((await laneBackground(run(), sessions, PANE, "/tmp/w", T0 + 30_000, 0, home))?.map((j) => j.id)).toEqual(["st_0e2e"]);
+  expect(await laneBackground(run(), sessions, PANE, "/tmp/w", T0 + 60_000, 0, home)).toEqual([]);
+});
+
+test("a running task's record started before notBefore is not what the lane waits on", async () => {
+  const home = join(state.dir, "home");
+  taskFile(home, "st_old", "running", T0 - 3 * 3_600_000);
+  expect(await laneBackground(run(), sessions, PANE, "/tmp/w", Number.POSITIVE_INFINITY, T0 - 3_600_000, home)).toEqual([]);
 });

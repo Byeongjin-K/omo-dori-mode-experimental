@@ -109,6 +109,8 @@ test("a lane at its prompt waiting on a child task or a dori heavy run is not st
   world.screen = "❯ ";
   world.ps = "4000 1 bash\n4002 4000 bun /home/u/.bun/bin/dori heavy fullcpu2 --kind cpu --local -- bash ./run.sh";
   expect((await freshnessTick(deps, "/home/test")).map((act) => act.kind)).not.toContain("stalled");
+  // the same words in the transcript above the prompt are history, not the status line
+  world.screen = "the child said: 1 task on duty\n❯ ";
   world.ps = "4000 1 bash";
   expect((await freshnessTick(deps, "/home/test")).map((act) => act.kind)).toEqual(["stalled"]);
   expect(new Reports(state.dir).read(lane.key)?.lastEvent.text).toBe("idle prompt without Working or a fresh report");
