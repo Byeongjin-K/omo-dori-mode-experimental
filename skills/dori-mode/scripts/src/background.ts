@@ -13,7 +13,7 @@ import { argvSessionLog, readHerdrSessions, recordHerdrSession } from "./herdr-s
 // line, so a lane that ended its turn to wait for one looks idle on screen. Each start is read from the tool's own result
 // (never from text it printed: a lane that greps logs or omo's source must not look busy), each end from a delivered
 // notification or a kill/cancel result; a start without its end is still running.
-export type BackgroundJob = { readonly kind: "eval" | "bash" | "task" | "monitor"; readonly id: string; readonly at: number };
+export type BackgroundJob = { readonly kind: "eval" | "bash" | "task" | "monitor" | "heavy"; readonly id: string; readonly at: number };
 
 const BASH_START = /^(?:Command running in background with ID: |Command is still running; auto-detached to background with ID: )(bash_\w+)/;
 const TASK_START = /\((st_[0-9a-z]+), running\)/;
@@ -114,7 +114,7 @@ export const pendingBackground = (transcript: string, since = 0, until = Number.
 // st_01a17b36 on 2026-10-27, run 38 after 37 completions) still runs although the transcript shows it ended.
 // host: the process that runs it (host_pid): the session's own agent for an in-process task, the account's shared task host
 // (omo --mode rpc --multi-session) for one in execution mode "process"
-export type TaskRecord = { readonly id: string; readonly status: string; readonly file: string; readonly at?: string; readonly what?: string; readonly host?: number; readonly mode?: string };
+export type TaskRecord = { readonly id: string; readonly status: string; readonly file: string; readonly at?: string; readonly ended?: string; readonly what?: string; readonly host?: number; readonly mode?: string };
 
 // senpi's task statuses are pending, running, paused, completed, error, cancelled, interrupted and lost; the first three
 // have not ended
@@ -130,7 +130,7 @@ const taskDirs = (home: string): string[] => {
   }
 };
 
-type RawRecord = { readonly task_id?: string; readonly status?: string; readonly started_at?: string; readonly created_at?: string; readonly task_summary?: string; readonly parent_session_id?: string; readonly root_session_id?: string; readonly host_pid?: number | null; readonly execution_mode?: string };
+type RawRecord = { readonly task_id?: string; readonly status?: string; readonly started_at?: string; readonly created_at?: string; readonly task_summary?: string; readonly parent_session_id?: string; readonly root_session_id?: string; readonly host_pid?: number | null; readonly execution_mode?: string; readonly terminal_at?: string };
 
 const parseRecord = (file: string, text: string): (TaskRecord & { readonly parent?: string; readonly root?: string }) | undefined => {
   let r: RawRecord;
@@ -141,7 +141,7 @@ const parseRecord = (file: string, text: string): (TaskRecord & { readonly paren
   }
   const id = r.task_id ?? file.slice(file.lastIndexOf("/") + 1, -".json".length);
   const at = r.started_at ?? r.created_at;
-  return { id, status: r.status ?? "", file, ...(at ? { at } : {}), ...(r.task_summary ? { what: r.task_summary } : {}), ...(typeof r.host_pid === "number" ? { host: r.host_pid } : {}), ...(r.execution_mode ? { mode: r.execution_mode } : {}), ...(r.parent_session_id ? { parent: r.parent_session_id } : {}), ...(r.root_session_id ? { root: r.root_session_id } : {}) };
+  return { id, status: r.status ?? "", file, ...(at ? { at } : {}), ...(r.terminal_at ? { ended: r.terminal_at } : {}), ...(r.task_summary ? { what: r.task_summary } : {}), ...(typeof r.host_pid === "number" ? { host: r.host_pid } : {}), ...(r.execution_mode ? { mode: r.execution_mode } : {}), ...(r.parent_session_id ? { parent: r.parent_session_id } : {}), ...(r.root_session_id ? { root: r.root_session_id } : {}) };
 };
 
 // The record of one task, under any project; undefined when senpi keeps none.
@@ -169,7 +169,7 @@ export const taskRecords = (home: string, session: string): TaskRecord[] => {
       }
       if (!text.includes(session)) continue;
       const r = parseRecord(file, text);
-      if (r && (r.parent === session || r.root === session)) out.push({ id: r.id, status: r.status, file: r.file, ...(r.at ? { at: r.at } : {}), ...(r.what ? { what: r.what } : {}), ...(r.host !== undefined ? { host: r.host } : {}), ...(r.mode ? { mode: r.mode } : {}) });
+      if (r && (r.parent === session || r.root === session)) out.push({ id: r.id, status: r.status, file: r.file, ...(r.at ? { at: r.at } : {}), ...(r.ended ? { ended: r.ended } : {}), ...(r.what ? { what: r.what } : {}), ...(r.host !== undefined ? { host: r.host } : {}), ...(r.mode ? { mode: r.mode } : {}) });
     }
   }
   return out;
@@ -184,9 +184,6 @@ export const taskRecords = (home: string, session: string): TaskRecord[] => {
 export const strayTasks = (home: string, session: string, alive: (pid: number) => boolean, leave?: number): TaskRecord[] =>
   taskRecords(home, session).filter((r) => taskOpen(r) && (r.host === undefined || (r.host !== leave && alive(r.host))));
 
-// The lane's own session transcript (the session its pane's omo runs) and the agent's start, or undefined when either
-// cannot be read. Jobs started before the agent process started died with the earlier process; jobs started before
-// notBefore (a server or watcher left running for hours) are not what the lane waits on.
 // The transcript file of the session a pane's omo runs, and that agent's pid, or undefined when either cannot be read.
 export const sessionFile = async (run: Runner, sessionsDir: string, pane: string, cwd: string, table?: readonly Proc[], stateDir?: string): Promise<{ readonly path: string; readonly pid: number; readonly via: SessionHit["via"] } | undefined> => {
   const kept = stateDir ? readHerdrSessions(stateDir)[pane] : undefined;
@@ -234,13 +231,3 @@ export const pidAlive = (pid: number): boolean => {
 // the caller's age window (notBefore).
 export const restoredMonitors = (sessionsDir: string, cwd: string, session: string, agentStart: number, now = Date.now()): MonitorSpec[] =>
   liveMonitors(readManifest(manifestPath(sessionsDir, cwd, session)).filter((e) => (e as { createdAt?: number }).createdAt !== undefined && (e as { createdAt: number }).createdAt < agentStart), now, pidAlive, homedir());
-
-export const laneBackground = async (run: Runner, sessionsDir: string, pane: string, cwd: string, until = Number.POSITIVE_INFINITY, notBefore = 0): Promise<BackgroundJob[] | undefined> => {
-  const file = await sessionFile(run, sessionsDir, pane, cwd);
-  if (!file) return undefined;
-  const started = Date.parse((await run(["ps", "-o", "lstart=", "-p", String(file.pid)])).out.trim());
-  const jobs = pendingBackground(readFileSync(file.path, "utf8"), Math.max(Number.isNaN(started) ? 0 : started, notBefore), until);
-  const id = /_([^_]+)\.jsonl$/.exec(file.path)?.[1];
-  const restored = id && !Number.isNaN(started) ? restoredMonitors(sessionsDir, cwd, id, started) : [];
-  return [...jobs, ...restored.map((m) => ({ kind: "monitor" as const, id: `restored:${m.description}`, at: 0 }))];
-};

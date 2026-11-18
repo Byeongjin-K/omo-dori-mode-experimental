@@ -129,7 +129,14 @@ export class Reports {
     return report;
   }
 
-  observe(key: string, screen: string, now: number, staleAfterMs: number, resumeOnWorking = true): Progress | null {
+  // no fresh report for staleAfterMs: the time from which an idle prompt is a stall
+  stale(progress: Progress, now: number, staleAfterMs: number): boolean {
+    return now - Date.parse(progress.lastReport?.at ?? progress.lastEvent.at) >= staleAfterMs;
+  }
+
+  // waitingOn: what the lane waits on at its prompt (a child task, a dori heavy run, a monitor: freshness reads it); an idle
+  // prompt beside it is not a stall, and a stalled lane that waits on one runs again
+  observe(key: string, screen: string, now: number, staleAfterMs: number, resumeOnWorking = true, waitingOn?: string): Progress | null {
     const progress = this.read(key);
     if (!progress || (progress.state !== "running" && progress.state !== "stalled")) return progress;
     const visible = Bun.stripANSI(screen);
@@ -143,12 +150,13 @@ export class Reports {
     // An old failure above later Working output is history, not the current state.
     const failed = lastAt(/compaction (?:failed|failure|error)|failed to compact|error (?:during|in) compaction|auto-?compaction failed/gi) > workingAt;
     const idle = /^\s*[❯>]\s*$/m.test(visible);
-    const stale = now - Date.parse(progress.lastReport?.at ?? progress.lastEvent.at) >= staleAfterMs;
-    const state = failed || (idle && !working && stale) ? "stalled" : working && resumeOnWorking ? "running" : progress.state;
+    const stale = this.stale(progress, now, staleAfterMs);
+    const resumed = working && resumeOnWorking;
+    const state = failed || (idle && !working && stale && !waitingOn) ? "stalled" : resumed || waitingOn ? "running" : progress.state;
     if (state === progress.state) return progress;
     const event: Activity = {
       type: "activity", key, at: new Date(now).toISOString(), state,
-      text: failed ? "compaction failed" : state === "stalled" ? "idle prompt without Working or a fresh report" : "Working activity resumed",
+      text: failed ? "compaction failed" : state === "stalled" ? "idle prompt without Working or a fresh report" : resumed ? "Working activity resumed" : `waiting on ${waitingOn}`,
     };
     this.append(event);
     return this.read(key);

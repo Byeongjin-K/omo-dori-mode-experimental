@@ -1,6 +1,6 @@
 import { paneActivity } from "./aoe.ts";
 import { autoturnTick } from "./autoturn.ts";
-import { laneBackground } from "./background.ts";
+import { laneBackground } from "./lane-wait.ts";
 import { laneDeathTick, laneSuspendTick } from "./lane-death.ts";
 import { leadDownTick } from "./lead-down.ts";
 import { leadInboxTick } from "./lead-inbox.ts";

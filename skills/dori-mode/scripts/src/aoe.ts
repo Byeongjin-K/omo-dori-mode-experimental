@@ -5,6 +5,7 @@ import { closeHerdrSession, herdrAgentPid, herdrLife, herdrRead, herdrSessions, 
 import type { Pane } from "./panes.ts";
 import { type Clock, type Runner, runtimesOf } from "./run.ts";
 import { turnRunning } from "./submit.ts";
+import { onDuty } from "./duty-line.ts";
 
 // pane: the herdr pane id of a herdr session (herdr.ts); aoe sessions are matched by their tmux name
 export type AoeSession = { readonly id: string; readonly title: string; readonly path: string; readonly tool?: string; readonly profile?: string; readonly pane?: string; readonly tab?: string };
@@ -61,8 +62,7 @@ export const aoeStates = async (run: Runner): Promise<Map<string, string>> => {
 
 // omo prints "esc to interrupt" while its main turn runs, on its input box's top border (turnRunning reads only there: the
 // status lines under the box may quote the words in the cwd, session title or goal objective). Between turns its status line shows what will wake it:
-// a monitor ("◉ watching ..."), wake sources on duty, a scheduled goal continuation, an active goal.
-// aoe's state lags behind all of these, and shows an open omo question ("Ask user · ...") as idle.
+// a monitor ("◉ watching ..."), what is on duty (duty-line.ts onDuty), a scheduled goal continuation, an active goal; aoe's state lags behind all of these, and shows an open omo question ("Ask user · ...") as idle.
 export const BUSY_MARK = "esc to interrupt";
 export const WAKE_MARKS = ["◉ watching", "wake source", "goal continues in", "Pursuing goal"];
 export const QUESTION_MARK = /Ask user ·|\(\d+\/\d+ answered\)/;
@@ -83,7 +83,7 @@ export const paneActivity = async (run: Runner, panes: readonly string[]): Promi
     if (turnRunning(screen)) out.set(pane, "busy");
     else if (state === "waiting" || state === "error") out.set(pane, state);
     else if (QUESTION_MARK.test(screen)) out.set(pane, "question");
-    else if (WAKE_MARKS.some((m) => screen.includes(m))) out.set(pane, "running");
+    else if (WAKE_MARKS.some((m) => screen.includes(m)) || onDuty(screen)) out.set(pane, "running");
     else out.set(pane, state === "idle" ? "idle" : "running");
   }
   return out;
