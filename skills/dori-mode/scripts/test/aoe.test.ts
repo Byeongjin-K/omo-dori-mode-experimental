@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { laneBackground } from "../src/background.ts";
+import { laneBackground } from "../src/lane-wait.ts";
 import { appendFileSync, chmodSync, mkdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 

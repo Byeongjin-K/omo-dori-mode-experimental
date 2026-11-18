@@ -61,10 +61,10 @@ export const aoeStates = async (run: Runner): Promise<Map<string, string>> => {
 
 // omo prints "esc to interrupt" while its main turn runs, on its input box's top border (turnRunning reads only there: the
 // status lines under the box may quote the words in the cwd, session title or goal objective). Between turns its status line shows what will wake it:
-// a monitor ("◉ watching ..."), wake sources on duty, a scheduled goal continuation, an active goal.
-// aoe's state lags behind all of these, and shows an open omo question ("Ask user · ...") as idle.
+// a monitor ("◉ watching ..."), what is on duty ("1 task · 2 evals on duty": the last source's words mark it), a scheduled goal
+// continuation (ON_DUTY_MARKS: no freshness STALLED beside them), an active goal. aoe's state lags behind, shows an omo question as idle.
 export const BUSY_MARK = "esc to interrupt";
-export const WAKE_MARKS = ["◉ watching", "wake source", "goal continues in", "Pursuing goal"];
+export const ON_DUTY_MARKS = ["◉ watching", "wake source", " task on duty", " tasks on duty", " eval on duty", " evals on duty", " bash on duty", " bash sessions on duty", "goal continues in"], WAKE_MARKS = [...ON_DUTY_MARKS, "Pursuing goal"];
 export const QUESTION_MARK = /Ask user ·|\(\d+\/\d+ answered\)/;
 
 export type Activity = "busy" | "running" | "waiting" | "error" | "question" | "idle";

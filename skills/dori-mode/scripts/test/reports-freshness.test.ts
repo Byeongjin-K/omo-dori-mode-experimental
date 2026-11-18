@@ -96,6 +96,32 @@ test("a stalled structured lane alerts once and is not nudged or told again", as
   expect(sent(world)).toEqual([]);
 });
 
+// GongDori's e7-e2e-plan-exec, 2026-11-18 07:23-07:31Z: STALLED every two minutes while it waited at its prompt on a child task
+test("a lane at its prompt waiting on a child task or a dori heavy run is not stalled; a bare idle prompt still is", async () => {
+  const world = newWorld();
+  const deps = depsFor(world, fakeClock(T0 + 21 * MIN), state.dir);
+  await deps.registry.write({ ...lane, thread: "none" });
+  reports.report(lane.key, "milestone", "started", T0);
+  world.screen = "❯ \n  ◆ e7-e2e-plan-exec · 1 task on duty";
+  // a quiet lane is still nudged to report, as any running one; only the lead's STALLED alert is gone
+  expect((await freshnessTick(deps, "/home/test")).map((act) => act.kind)).toEqual(["nudged"]);
+  // the herdr pane's shell (pid 4000) runs the lane's dori heavy job
+  world.screen = "❯ ";
+  world.ps = "4000 1 bash\n4002 4000 bun /home/u/.bun/bin/dori heavy fullcpu2 --kind cpu --local -- bash ./run.sh";
+  expect((await freshnessTick(deps, "/home/test")).map((act) => act.kind)).not.toContain("stalled");
+  world.ps = "4000 1 bash";
+  expect((await freshnessTick(deps, "/home/test")).map((act) => act.kind)).toEqual(["stalled"]);
+  expect(new Reports(state.dir).read(lane.key)?.lastEvent.text).toBe("idle prompt without Working or a fresh report");
+});
+
+test("a stalled lane that starts waiting on work it handed off runs again", () => {
+  reports.report(lane.key, "milestone", "started", T0);
+  expect(reports.observe(lane.key, "❯ ", T0 + 16 * MIN, 15 * MIN)?.state).toBe("stalled");
+  const now = reports.observe(lane.key, "❯ ", T0 + 18 * MIN, 15 * MIN, true, "task:st_0e2e");
+  expect([now?.state, now?.lastEvent.text]).toEqual(["running", "waiting on task:st_0e2e"]);
+  expect(reports.observe(lane.key, "❯ ", T0 + 20 * MIN, 15 * MIN, true, "task:st_0e2e")?.lastEvent.at).toBe(new Date(T0 + 18 * MIN).toISOString());
+});
+
 test.each(["blocker", "halted", "done", "question"] as const)("a %s report reaches the lead without nudging the lane", async (kind) => {
   const world = newWorld();
   const deps = depsFor(world, fakeClock(T0 + 30 * MIN), state.dir);

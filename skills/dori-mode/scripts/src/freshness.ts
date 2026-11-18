@@ -6,6 +6,8 @@ import { dailyFile, dailySnapshot } from "./compaction-keep.ts";
 import { type Lane, type RolloverDue, statusOf } from "./registry.ts";
 import { fixTag, recordFix } from "./same-fix.ts";
 import { taskOpen, taskRecord } from "./background.ts";
+import { laneBackground } from "./lane-wait.ts";
+import { ON_DUTY_MARKS } from "./aoe.ts";
 import { waitingRequest } from "./lane-handover.ts";
 import { readRollovers } from "./rollover.ts";
 import { auditDue, weeklyDue, writeMarker } from "./rollover-audit.ts";
@@ -68,11 +70,28 @@ export const freshnessTick = async (deps: FlowDeps, home: string, given: Rollove
     return transcriptReport(leadLines, lane.key) ?? lastReportLine(leadScreen, lane.key) ?? lastReportLine(await readScreen(deps.run, deps.config.backend, lane.pane ?? "", 200), lane.key);
   };
   const reports = new Reports(deps.config.stateDir);
+  // What a quiet lane at its prompt waits on (GongDori's e7-e2e-plan-exec on a child task, STALLED every two minutes on
+  // 2026-11-18): senpi's records, the transcript and the process table first (lane-wait.ts laneBackground, the blocked
+  // check's reading), with the same age window (work started blockedWaitMin before its last report, a server left running, does
+  // not count); omo's duty line on the screen when those cannot be read or show nothing.
+  const waitingOn = async (lane: Lane, screen: string, progress: Progress): Promise<string | undefined> => {
+    const since = Date.parse(progress.lastReport?.at ?? progress.lastEvent.at) - deps.config.blockedWaitMin * 60_000;
+    const jobs = await laneBackground(deps.run, deps.config.sessionsDir, lane.pane ?? "", lane.cwd ?? "", now, since, home).catch((e: unknown) => {
+      watchLog(deps.config.watchLog, deps.clock, { source: "freshness", line: `FRESHNESS_WARN background check ${lane.key}: ${String(e).slice(0, 160)}` });
+      return undefined;
+    });
+    if (jobs?.length) return jobs.map((j) => `${j.kind}:${j.id}`).join(",");
+    const mark = ON_DUTY_MARKS.find((m) => Bun.stripANSI(screen).includes(m));
+    return mark ? `screen:${mark.trim()}` : undefined;
+  };
   const readProgress = async (lane: Lane): Promise<{ readonly previous: Progress | null; readonly progress: Progress | null; readonly report: string | null; readonly error: ReportError | null }> => {
     if (lane.reportProtocol !== "jsonl-v1") return { previous: null, progress: null, report: await lastReport(lane), error: null };
     try {
       const previous = reports.read(lane.key);
-      const progress = previous ? reports.observe(lane.key, await readScreen(deps.run, deps.config.backend, lane.pane ?? ""), now, deps.config.nudgeAfterMin * 60_000) : null;
+      const staleMs = deps.config.nudgeAfterMin * 60_000;
+      const screen = previous ? await readScreen(deps.run, deps.config.backend, lane.pane ?? "") : "";
+      const waiting = previous && reports.stale(previous, now, staleMs) ? await waitingOn(lane, screen, previous) : undefined;
+      const progress = previous ? reports.observe(lane.key, screen, now, staleMs, true, waiting) : null;
       return { previous, progress, report: progress?.lastReport ? reportLine(progress.lastReport) : null, error: null };
     } catch (error) {
       if (!(error instanceof ReportError)) throw error;

@@ -13,7 +13,7 @@ import { argvSessionLog, readHerdrSessions, recordHerdrSession } from "./herdr-s
 // line, so a lane that ended its turn to wait for one looks idle on screen. Each start is read from the tool's own result
 // (never from text it printed: a lane that greps logs or omo's source must not look busy), each end from a delivered
 // notification or a kill/cancel result; a start without its end is still running.
-export type BackgroundJob = { readonly kind: "eval" | "bash" | "task" | "monitor"; readonly id: string; readonly at: number };
+export type BackgroundJob = { readonly kind: "eval" | "bash" | "task" | "monitor" | "heavy"; readonly id: string; readonly at: number };
 
 const BASH_START = /^(?:Command running in background with ID: |Command is still running; auto-detached to background with ID: )(bash_\w+)/;
 const TASK_START = /\((st_[0-9a-z]+), running\)/;
@@ -184,9 +184,6 @@ export const taskRecords = (home: string, session: string): TaskRecord[] => {
 export const strayTasks = (home: string, session: string, alive: (pid: number) => boolean, leave?: number): TaskRecord[] =>
   taskRecords(home, session).filter((r) => taskOpen(r) && (r.host === undefined || (r.host !== leave && alive(r.host))));
 
-// The lane's own session transcript (the session its pane's omo runs) and the agent's start, or undefined when either
-// cannot be read. Jobs started before the agent process started died with the earlier process; jobs started before
-// notBefore (a server or watcher left running for hours) are not what the lane waits on.
 // The transcript file of the session a pane's omo runs, and that agent's pid, or undefined when either cannot be read.
 export const sessionFile = async (run: Runner, sessionsDir: string, pane: string, cwd: string, table?: readonly Proc[], stateDir?: string): Promise<{ readonly path: string; readonly pid: number; readonly via: SessionHit["via"] } | undefined> => {
   const kept = stateDir ? readHerdrSessions(stateDir)[pane] : undefined;
@@ -234,13 +231,3 @@ export const pidAlive = (pid: number): boolean => {
 // the caller's age window (notBefore).
 export const restoredMonitors = (sessionsDir: string, cwd: string, session: string, agentStart: number, now = Date.now()): MonitorSpec[] =>
   liveMonitors(readManifest(manifestPath(sessionsDir, cwd, session)).filter((e) => (e as { createdAt?: number }).createdAt !== undefined && (e as { createdAt: number }).createdAt < agentStart), now, pidAlive, homedir());
-
-export const laneBackground = async (run: Runner, sessionsDir: string, pane: string, cwd: string, until = Number.POSITIVE_INFINITY, notBefore = 0): Promise<BackgroundJob[] | undefined> => {
-  const file = await sessionFile(run, sessionsDir, pane, cwd);
-  if (!file) return undefined;
-  const started = Date.parse((await run(["ps", "-o", "lstart=", "-p", String(file.pid)])).out.trim());
-  const jobs = pendingBackground(readFileSync(file.path, "utf8"), Math.max(Number.isNaN(started) ? 0 : started, notBefore), until);
-  const id = /_([^_]+)\.jsonl$/.exec(file.path)?.[1];
-  const restored = id && !Number.isNaN(started) ? restoredMonitors(sessionsDir, cwd, id, started) : [];
-  return [...jobs, ...restored.map((m) => ({ kind: "monitor" as const, id: `restored:${m.description}`, at: 0 }))];
-};
