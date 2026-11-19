@@ -114,9 +114,14 @@ export const takeLock = (lock: string, now: number, what: string, key: string): 
       closeSync(fd); // a release removed (or replaced) the file between our open and our flock
       continue;
     }
-    ftruncateSync(fd, 0);
-    writeSync(fd, record);
-    fsyncSync(fd);
+    try {
+      ftruncateSync(fd, 0);
+      writeSync(fd, record);
+      fsyncSync(fd);
+    } catch (error) {
+      closeSync(fd); // a full disk (ENOSPC) must not leave the lock held by a descriptor nobody can release
+      throw error;
+    }
     let released = false;
     return () => {
       if (released) return;

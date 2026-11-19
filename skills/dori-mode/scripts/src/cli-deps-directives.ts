@@ -1,3 +1,4 @@
+import { appendInboxRow } from "./inbox-append.ts";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -35,6 +36,10 @@ export const makeDirectiveDeps = (cli: Pick<Cli, "config" | "discordToken" | "de
   };
   // the inbox dori directive-audit reads the owner's messages from and leaves its notices for the lead in
   const auditInbox = (): string => config.handover.inbox || process.env["DORI_DISCORD_INBOX"]?.trim() || join(config.stateDir, "discord", "inbox.jsonl");
+  // one row for the lead in that inbox, its kind telling what it is (backlog-start, backlog-ask, host-guard, ...)
+  const leadInbox = (kind: string, id: string, content: string): void => {
+    appendInboxRow(auditInbox(), { ts: new Date().toISOString(), id, kind, content });
+  };
   // why a Discord message link is not the owner's word (his account or his registered webhook), or undefined when it is
   const ownerLinkProblem = async (url: string, maxAgeMs?: number): Promise<string | undefined> => {
     const m = /^https:\/\/(?:ptb\.|canary\.)?discord(?:app)?\.com\/channels\/\d+\/(\d+)\/(\d+)$/.exec(url.trim());
@@ -48,5 +53,5 @@ export const makeDirectiveDeps = (cli: Pick<Cli, "config" | "discordToken" | "de
     if (maxAgeMs !== undefined && Date.now() - Date.parse(msg.timestamp ?? "") > maxAgeMs) return `the owner's message is older than ${Math.round(maxAgeMs / 3_600_000)} hours`;
     return undefined;
   };
-  return { hintLedger, leadMemoryRepo, inboxText, auditInbox, ownerLinkProblem };
+  return { hintLedger, leadMemoryRepo, inboxText, auditInbox, leadInbox, ownerLinkProblem };
 };

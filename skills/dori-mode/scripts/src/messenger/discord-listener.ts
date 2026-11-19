@@ -1,3 +1,4 @@
+import { appendInboxRow, inboxRows } from "../inbox-append.ts";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
@@ -211,9 +212,8 @@ export class DiscordListener {
     this.eyesFile = join(dirname(d.inboxFile), "eyes.json");
     this.backfillFile = d.shadow ? `${d.inboxFile}.backfill.json` : join(dirname(d.inboxFile), "backfill.json");
     if (existsSync(this.eyesFile)) this.eyes = JSON.parse(readFileSync(this.eyesFile, "utf8")) as Record<string, string[]>;
-    for (const line of existsSync(d.inboxFile) ? readFileSync(d.inboxFile, "utf8").split("\n") : []) {
-      if (!line.trim()) continue;
-      const row = JSON.parse(line) as { id: string; kind?: string; scope?: string; channel_id?: string; called?: boolean; author_id?: string; reply_to?: string | null; content?: string };
+    for (const raw of inboxRows(d.inboxFile, d.log)) {
+      const row = raw as { id: string; kind?: string; scope?: string; channel_id?: string; called?: boolean; author_id?: string; reply_to?: string | null; content?: string };
       this.seen.add(row.id);
       if (row.scope === "pair" && row.called === false) this.uncalled.add(row.id);
       if (row.scope === "pair-bot" && row.channel_id)
@@ -227,10 +227,6 @@ export class DiscordListener {
     }
     // DM history starts at zero once: a missed first DM can predate every recorded DM.
     if (existsSync(this.backfillFile)) Object.assign(this.scanCursors, JSON.parse(readFileSync(this.backfillFile, "utf8")));
-  }
-
-  private append(row: InboxMessage | InboxAnswer): void {
-    appendFileSync(this.d.inboxFile, `${JSON.stringify(row)}\n`, { mode: 0o600 });
   }
 
   private track(p: Promise<void>, tag: string): void {
@@ -364,7 +360,7 @@ export class DiscordListener {
     const called = scope === "pair" && this.d.words.callNames.length ? (this.calledHere(m, `${m.content ?? ""}\n${transcript ?? ""}`) ? true : this.rolesStale || unheard ? undefined : false) : undefined;
     if (called === false) this.uncalled.add(m.id);
     const note = open.length ? `card ${open.join(", ")} still open, owner replied in text: resolve it with dori resolve ${open[0]} --answer "<the answer, short>" so the card folds` : "";
-    this.append({
+    appendInboxRow(this.d.inboxFile, {
       ts: m.timestamp,
       id: m.id,
       channel_id: m.channel_id,
@@ -382,7 +378,7 @@ export class DiscordListener {
       ...(scope === "pair" && !called ? { note: pairNote(m.id) } : {}),
       ...(called !== undefined ? { called } : {}),
       ...hints,
-    });
+    } satisfies InboxMessage);
     if (scope === "pair-bot") {
       const ids = answeredIds(m.channel_id, m.message_reference?.message_id, m.content);
       for (const id of ids) this.answered.set(id, { by: m.id, bot: m.author.id });
@@ -467,7 +463,7 @@ export class DiscordListener {
     if (outcome.kind === "refused") this.d.log(`CARD_REFUSED ${outcome.user}`);
     if (outcome.kind !== "answered") return;
     const q = outcome.question;
-    this.append({ ts: new Date(this.d.now()).toISOString(), id: i.id, kind: "answer", qid: q.id, answer: q.answer ?? "", answer_kind: q.answerKind ?? "button", question: q.text, thread: q.thread, session: q.session, tmux: q.tmux });
+    appendInboxRow(this.d.inboxFile, { ts: new Date(this.d.now()).toISOString(), id: i.id, kind: "answer", qid: q.id, answer: q.answer ?? "", answer_kind: q.answerKind ?? "button", question: q.text, thread: q.thread, session: q.session, tmux: q.tmux } satisfies InboxAnswer);
     this.d.log(`ANSWER ${q.id} ${q.answerKind} ${JSON.stringify(q.answer ?? "")} thread=${q.thread ?? "-"} session=${q.session ?? "-"} tmux=${q.tmux ?? "-"}`);
     await this.d.cards.afterAnswer(q).catch((e: unknown) => this.d.log(`DISCORD_ECHO_FAIL ${q.id} ${errText(e)}`));
   }
@@ -481,7 +477,7 @@ export class DiscordListener {
     const q = this.d.cards.store.get(option?.[1] ?? modal?.[1] ?? "");
     const value = option ? q?.options[Number(option[2])] : modal ? modalValue(i.data?.components).trim() : undefined;
     if ((i.member?.user.id ?? i.user?.id) !== this.d.owner || !q || !value) { this.d.log(`SHADOW_INTERACTION_SKIPPED ${i.id} ${cid}`); return; }
-    this.append({ ts: new Date(this.d.now()).toISOString(), id: i.id, kind: "answer", qid: q.id, answer: value, answer_kind: option ? "button" : "text", question: q.text, thread: q.thread, session: q.session, tmux: q.tmux });
+    appendInboxRow(this.d.inboxFile, { ts: new Date(this.d.now()).toISOString(), id: i.id, kind: "answer", qid: q.id, answer: value, answer_kind: option ? "button" : "text", question: q.text, thread: q.thread, session: q.session, tmux: q.tmux } satisfies InboxAnswer);
     this.d.log(`SHADOW_ANSWER ${q.id} ${JSON.stringify(value)}`);
   }
 

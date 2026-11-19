@@ -1,3 +1,4 @@
+import { mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { paneLife } from "./aoe.ts";
@@ -12,7 +13,7 @@ import { announceChange } from "./update-announce.ts";
 import { deadPaneTick, newDeadPaneState } from "./dead-panes.ts";
 import { watchTick } from "./done-flow.ts";
 import { leadNow } from "./hc-pane.ts";
-import { guardTick, outsideLines, sampleHost, sampleOutside } from "./host-guard.ts";
+import { diskTops, guardPass, guardStatePath, outsideLines, readGuardState, sampleHost, sampleOutside } from "./host-guard.ts";
 import { areaLabel, type AreaQuery, areaSignals, formatSignals } from "./lane-signals.ts";
 import { statusOf } from "./registry.ts";
 import { bootCheck, envSlackCheck } from "./boot.ts";
@@ -28,6 +29,8 @@ import { transcribe } from "./messenger/voice.ts";
 import type { Command } from "./cli-context.ts";
 import { die, every } from "./cli-context.ts";
 import { makeDiscordDeps } from "./cli-deps-discord.ts";
+import { makeDirectiveDeps } from "./cli-deps-directives.ts";
+import { CheckpointError, takeLock } from "./checkpoint-lock.ts";
 
 const notifyChangeCommand: Command = async (context) => {
   const { flags, config, need } = context;
@@ -129,11 +132,27 @@ const deadPanesCommand: Command = async (context) => {
 
 const guardCommand: Command = async (context) => {
   const { loopMinutes, config } = context;
-  const state = { alerting: false, outside: new Set<number>() };
+  const statePath = guardStatePath(config.stateDir);
+  const state = readGuardState(statePath);
+  const outside = new Set<number>();
+  const { leadInbox } = makeDirectiveDeps(context);
+  const deps = { statePath, now: () => Date.now(), tops: () => diskTops(run), inbox: leadInbox };
   const minutes = loopMinutes();
   console.log("HOST_GUARD_READY");
   await every(minutes, async () => {
-    for (const line of [...guardTick(await sampleHost(run, config), config.guard, state), ...outsideLines(await sampleOutside(run), state.outside)]) console.log(line);
+    // one guard pass at a time per state dir (the dori-lanes loop and a one-shot dori guard), so one alert is told once;
+    // takeLock is flock(2) itself (no flock binary, which macOS lacks), let go by the kernel if this process dies
+    let release: (() => void) | undefined;
+    let skipped = "";
+    try {
+      mkdirSync(dirname(statePath), { recursive: true });
+      release = takeLock(`${statePath}.lock`, Date.now(), "guard pass", statePath);
+    } catch (e) {
+      if (!(e instanceof CheckpointError)) throw e;
+      skipped = `HOST_GUARD_SKIPPED ${e.message}`;
+    }
+    const lines = release ? await guardPass(await sampleHost(run, config), config.guard, state, deps).finally(release) : [skipped];
+    for (const line of [...lines, ...outsideLines(await sampleOutside(run), outside)]) console.log(line);
   });
   return;
 };

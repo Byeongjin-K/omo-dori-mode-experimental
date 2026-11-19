@@ -42,6 +42,7 @@ import fcntl
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -414,9 +415,55 @@ def stamp(now: datetime) -> str:
 
 
 def append_inbox(record: dict) -> None:
-    fd = os.open(INBOX, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    lock, held = lock_inbox()
     try:
-        os.write(fd, (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8"))
+        fd = os.open(INBOX, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            os.write(fd, (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8"))
+        finally:
+            os.close(fd)
+    finally:
+        unlock_inbox(lock, held)
+
+
+# The append holds <inbox>.lock as every other inbox writer does (src/inbox-append.ts appendInboxRow and its takeLock):
+# no other writer's bytes land between this row's, and an append cut back after a failed write never takes this row with
+# it (review 7 of #509). Same protocol: flock, then the path must still name the file locked (a release removes it while
+# holding it), and the release removes it again. Waited for with no deadline, as appendInboxRow does (review 8 of #509);
+# past 5 s one INBOX_LOCK_WAIT line on stderr says a holder is stuck, and the wait goes on (flock resumes after the alarm).
+def lock_inbox(note_after: int = 5) -> tuple[str, int]:
+    lock = f"{INBOX}.lock"
+
+    def note(*_):
+        print(f"INBOX_LOCK_WAIT {INBOX} {note_after}", file=sys.stderr, flush=True)
+
+    old = signal.signal(signal.SIGALRM, note)
+    signal.alarm(note_after)
+    try:
+        while True:
+            fd = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                try:
+                    same = os.stat(lock).st_ino == os.fstat(fd).st_ino
+                except FileNotFoundError:  # another writer's release removed it while this one checked: take it again
+                    same = False
+                if same:
+                    return lock, fd
+            except BaseException:
+                os.close(fd)
+                raise
+            os.close(fd)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
+
+
+def unlock_inbox(lock: str, fd: int) -> None:
+    try:
+        os.unlink(lock)
+    except FileNotFoundError:
+        pass
     finally:
         os.close(fd)
 

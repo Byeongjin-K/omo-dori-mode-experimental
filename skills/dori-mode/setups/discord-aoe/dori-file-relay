@@ -26,7 +26,10 @@ starting with . or ending in .part .tmp .crdownload .swp ~ are skipped, and it m
 on two scans in a row, be unchanged for DORI_FILE_RELAY_SETTLE_SEC (10) and not be open for writing by any process of
 its account. Scans run every DORI_FILE_RELAY_INTERVAL seconds (10). Delivered: the receiver's lead inbox gets one
 kind "file-delivered" line (dori names, relative path, bytes, sha256; never the content), then the sender's file moves
-to ~/outbox/sent/<KST date>/to-<dori>/<path>. Refused, or failing 3 times: the file moves to
+to ~/outbox/sent/<KST date>/to-<dori>/<path>. The line is written under the receiver's <inbox>.lock, waited for
+DORI_FILE_RELAY_INBOX_WAIT seconds (30; 1 to 60, else --serve refuses to start) at most: while another writer holds it
+longer, or when the line cannot be written, the file stays in the outbox, one RELAY_INBOX_BUSY or RELAY_INBOX_FAILED <dori>
+line goes to stderr, the other deliveries go on, and a later scan writes the line and moves the file. Refused, or failing 3 times: the file moves to
 ~/outbox/to-<dori>/.failed/<path> with <path>.why next to it (the reason); one that cannot be moved there is logged once
 and tried again quietly on each scan.
 
@@ -356,8 +359,48 @@ def main():
 run(main)
 '''
 
-# Appends the line on stdin to the account's lead inbox (a regular file under its home).
+# Appends the line on stdin to the account's lead inbox (a regular file under its home), holding <inbox>.lock as every
+# other inbox writer does (src/inbox-append.ts appendInboxRow and its takeLock): no other writer's bytes land between this
+# line's, and an append cut back after a failed write never takes this line with it (review 7 of #509). Same protocol:
+# flock, then the path must still name the file locked (a release removes it while holding it), and the release removes
+# it again. Waited for wait seconds (argv 5) at most, then refused as inbox-busy with nothing written: the relay keeps that
+# file in the outbox and wakes the receiver on a later cycle, so one stuck writer stops neither the row nor the relay's
+# other deliveries (review 9 of #509).
 INBOX = COMMON + r'''
+import fcntl, signal
+
+class Busy(Exception):
+    pass
+
+def late(*_):
+    raise Busy()
+
+def lock_inbox(lock, wait):
+    until = time.time() + wait
+    signal.signal(signal.SIGALRM, late)
+    signal.alarm(wait)
+    try:
+        while True:
+            fd = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                signal.alarm(0)  # an alarm before this line found nothing written yet
+                try:
+                    same = os.stat(lock).st_ino == os.fstat(fd).st_ino
+                except FileNotFoundError:  # another writer's release removed it while this one checked: take it again
+                    same = False
+                if same:
+                    return fd
+                signal.alarm(max(1, int(until - time.time())))
+            except BaseException:
+                os.close(fd)
+                raise
+            os.close(fd)
+    except Busy:
+        raise Refused("inbox-busy") from None
+    finally:
+        signal.alarm(0)
+
 def main():
     path = sys.argv[4]
     _, home = home_fd()
@@ -366,13 +409,22 @@ def main():
     if not os.path.realpath(path).startswith(os.path.realpath(home) + "/"):
         raise Refused("inbox-outside-home")
     line = sys.stdin.buffer.read()
-    f = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    lock = path + ".lock"
+    held = lock_inbox(lock, int(sys.argv[5]))
     try:
-        if not stat.S_ISREG(os.fstat(f).st_mode):
-            raise Refused("inbox-not-a-regular-file")
-        os.write(f, line)
+        f = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        try:
+            if not stat.S_ISREG(os.fstat(f).st_mode):
+                raise Refused("inbox-not-a-regular-file")
+            os.write(f, line)
+        finally:
+            os.close(f)
     finally:
-        os.close(f)
+        try:
+            os.unlink(lock)
+        except FileNotFoundError:
+            pass
+        os.close(held)
     sys.stderr.write("APPENDED\n")
 
 run(main)
@@ -540,10 +592,13 @@ MAX_ERRORS = 3
 
 
 class Server:
-    def __init__(self, doris: dict, cap: int, settle: float, interval: float):
+    def __init__(self, doris: dict, cap: int, settle: float, interval: float, inbox_wait: int):
         self.doris, self.cap, self.settle, self.interval = doris, cap, settle, interval
         self.accounts = tuple(a for a, _ in doris.values())
         self.prev, self.errors, self.delivered, self.scan_errors, self.unmoved = {}, {}, {}, {}, {}
+        # copied, but the receiver's inbox was busy or its write failed: key -> (sig, info, entry); the next cycle only wakes it
+        self.waking = {}
+        self.inbox_wait = inbox_wait
 
     def kst_date(self) -> str:
         return time.strftime("%Y-%m-%d", time.gmtime(time.time() + 9 * 3600))
@@ -606,7 +661,7 @@ class Server:
         }
         if not inbox:
             raise RuntimeError("no inbox set")
-        call(acct, "inbox", INBOX, [inbox], (json.dumps(line, ensure_ascii=False) + "\n").encode())
+        call(acct, "inbox", INBOX, [inbox, str(self.inbox_wait)], (json.dumps(line, ensure_ascii=False) + "\n").encode())
 
     def deliver(self, name: str, row: dict, key: tuple, sig: tuple) -> None:
         src_acct, dst_acct = self.doris[name][0], self.doris[row["to"]][0]
@@ -614,25 +669,38 @@ class Server:
         if row["type"] != "reg":
             entry["src"] = f"{src_acct}:outbox/to-{row['to']}/{row['rel']}"
             return self.fail(name, row, row["type"], entry, key, sig)
-        try:
-            _, info = relay(src_acct, f"to-{row['to']}/{row['rel']}", dst_acct, f"from-{name}/{row['rel']}", True,
-                            self.cap, entry, self.accounts)
-        except Refused as e:
-            if str(e) in RETRY:
-                return log(dict(entry, result="retry", reason=str(e)))
-            return self.fail(name, row, str(e), entry, key, sig)
-        except Exception as e:  # logged; after MAX_ERRORS the file is set aside with the reason
-            n = self.errors[key] = self.errors.get(key, 0) + 1
-            reason = f"{type(e).__name__}: {e}"[:300]
-            if n >= MAX_ERRORS:
-                return self.fail(name, row, f"error x{n}: {reason}", entry, key, sig)
-            return log(dict(entry, result="error", reason=reason, attempt=n))
-        entry.update(result="ok", replaced=info["replaced"])
+        waiting = self.waking.get(key)
+        if waiting and waiting[0] == sig:
+            info, entry = waiting[1], waiting[2]
+        else:
+            try:
+                _, info = relay(src_acct, f"to-{row['to']}/{row['rel']}", dst_acct, f"from-{name}/{row['rel']}", True,
+                                self.cap, entry, self.accounts)
+            except Refused as e:
+                if str(e) in RETRY:
+                    return log(dict(entry, result="retry", reason=str(e)))
+                return self.fail(name, row, str(e), entry, key, sig)
+            except Exception as e:  # logged; after MAX_ERRORS the file is set aside with the reason
+                n = self.errors[key] = self.errors.get(key, 0) + 1
+                reason = f"{type(e).__name__}: {e}"[:300]
+                if n >= MAX_ERRORS:
+                    return self.fail(name, row, f"error x{n}: {reason}", entry, key, sig)
+                return log(dict(entry, result="error", reason=reason, attempt=n))
+            entry.update(result="ok", replaced=info["replaced"])
         try:
             self.wake(name, row["to"], info)
             entry["woke"] = True
-        except (Refused, RuntimeError) as e:
-            entry.update(woke=False, wake_error=str(e)[:200])
+        except (Refused, RuntimeError) as e:  # the file stays in the outbox; told once, woken on a later cycle
+            if key not in self.waking:
+                why = (f"the inbox lock is held over {self.inbox_wait} s" if str(e) == "inbox-busy"
+                       else f"its inbox could not be written ({str(e)[:200]})")
+                head = "RELAY_INBOX_BUSY" if str(e) == "inbox-busy" else "RELAY_INBOX_FAILED"
+                sys.stderr.write(f"{head} {row['to']}: to-{row['to']}/{row['rel']} stays in {name}'s outbox: {why}\n")
+                sys.stderr.flush()
+                log(dict(entry, result="busy" if str(e) == "inbox-busy" else "wake_failed", wake_error=str(e)[:200]))
+            self.waking[key] = (sig, info, entry)
+            return
+        self.waking.pop(key, None)
         try:
             entry["sent_as"] = f"sent/{self.kst_date()}/to-{row['to']}/{self.move(name, row, 'sent', info['ident'])}"
         except (Refused, RuntimeError) as e:  # still there: not sent twice while this service runs
@@ -656,7 +724,7 @@ class Server:
                     if self.delivered.get(key) == sig:
                         continue
                 self.deliver(name, row, key, sig)
-        for d in (self.prev, self.errors, self.delivered, self.unmoved):
+        for d in (self.prev, self.errors, self.delivered, self.unmoved, self.waking):
             for k in [k for k in d if k not in seen]:
                 del d[k]
 
@@ -697,6 +765,11 @@ def main() -> int:
         if len(doris) < 2:
             sys.stderr.write("dori-file-relay --serve: set DORI_FILE_RELAY_DORIS (two Dori accounts or more)\n")
             return 2
+        wait = os.environ.get("DORI_FILE_RELAY_INBOX_WAIT", "30")
+        if not (wait.isdigit() and 1 <= int(wait) <= 60):  # under the helper's 120 s stop, so a wait is never cut short
+            sys.stderr.write("dori-file-relay --serve: DORI_FILE_RELAY_INBOX_WAIT must be whole seconds from 1 to 60 "
+                             f"(the inbox helper is stopped at 120 s), not {wait}\n")
+            return 2
         os.makedirs(STATE, mode=0o700, exist_ok=True)
         lock = open(os.path.join(STATE, "serve.lock"), "w")
         try:
@@ -704,7 +777,7 @@ def main() -> int:
         except BlockingIOError:
             sys.stderr.write("dori-file-relay --serve: already running\n")
             return 1
-        Server(doris, cap, number("DORI_FILE_RELAY_SETTLE_SEC", 10), number("DORI_FILE_RELAY_INTERVAL", 10)).serve(cycles)
+        Server(doris, cap, number("DORI_FILE_RELAY_SETTLE_SEC", 10), number("DORI_FILE_RELAY_INTERVAL", 10), int(wait)).serve(cycles)
         return 0
     replace = "--replace" in args
     args = [a for a in args if a != "--replace"]

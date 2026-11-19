@@ -4,9 +4,10 @@
 // (scope "slack"); a DM, a mention of the bot or a reply in a thread the Dori posted in also prints one SLACK_MSG line for
 // the lead's monitor. Replies go out with dori send slack --to <channel> [--thread <ts>] under the bot's name.
 // --wait waits for the tokens instead of exiting; --set-tokens asks for them on the terminal and writes them to dori.env.
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { configPath, envFilePath, loadConfig, loadEnvFile, resolveInstance } from "../../scripts/src/config.ts";
+import { appendInboxRow } from "../../scripts/src/inbox-append.ts";
 import { newAttempt, noteUneyed, readUneyed } from "../../scripts/src/messenger/slack.ts";
 import { slackToken, TokenFileError } from "../../scripts/src/slack-token.ts";
 import type { LedgerThread } from "../../scripts/src/messenger/thread-ledger.ts";
@@ -327,7 +328,7 @@ export const startWatch = async (o: SlackWatchOptions, log: (line: string) => vo
   }
   const self = { userId: String(me["user_id"] ?? ""), botId: String(me["bot_id"] ?? "") };
   mkdirSync(dirname(o.inbox), { recursive: true, mode: 0o700 });
-  const watch = new SlackWatch(o, self, { call: bot, threads: readThreads(o.threads), append: (row) => appendFileSync(o.inbox, `${JSON.stringify(row)}\n`), log, now: Date.now, reactMs, answered: (channel, ts) => readUneyed(o.uneyed).answered.has(`${channel}:${ts}`), note: (fact, channel, ts, attempt) => noteUneyed(o.uneyed, fact, `${channel}:${ts}`, attempt) });
+  const watch = new SlackWatch(o, self, { call: bot, threads: readThreads(o.threads), append: (row) => appendInboxRow(o.inbox, row), log, now: Date.now, reactMs, answered: (channel, ts) => readUneyed(o.uneyed).answered.has(`${channel}:${ts}`), note: (fact, channel, ts, attempt) => noteUneyed(o.uneyed, fact, `${channel}:${ts}`, attempt) });
   log(`SLACK_WATCH_START team ${String(me["team"] ?? "?")} bot ${String(me["user"] ?? self.userId)}`);
   await runSocket(
     {
