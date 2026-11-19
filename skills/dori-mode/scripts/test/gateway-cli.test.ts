@@ -94,3 +94,16 @@ test("the same gateway message twice is sent once, also when both start together
     expect(frames.map((f) => f["kind"])).toEqual(["post", "question", "post"]);
   });
 });
+
+test("a literal \\n in a receipt, a question option or a status row is refused before anything is written (review 3 of #511)", async () => {
+  await withSocket(async (path, frames, dir) => {
+    const results = [
+      await dori(path, dir, "--receipt", "Order\\nTotal", "--line", "Total=1"),
+      await dori(path, dir, "--receipt", "Order", "--line", "Total=1\\n2"),
+      await dori(path, dir, "--question", "Pay?", "--option", "Yes\\nNo", "--option", "Later"),
+      await dori(path, dir, "--status", "start", "--text", "Working", "--row", "running:Build\\nTest"),
+    ];
+    expect(results.map((r) => [r.code, r.err.split(" ")[0]])).toEqual(Array(4).fill([2, "SEND_LITERAL_NEWLINE"]));
+    expect(frames).toEqual([]);
+  });
+});

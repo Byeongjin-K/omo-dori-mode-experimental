@@ -8,7 +8,8 @@ import { Gateway, gatewaySocketPath, type LeadPort, unixConnector } from "./mess
 import type { InboundFrame, StatusPhase, WorkRow } from "./messenger/gateway-frames.ts";
 import { writeLineSync } from "./messenger/telegram-inbound.ts";
 import { realClock } from "./run.ts";
-import { duplicateLine, SEND_DUPLICATE_EXIT, type Sent, sendKey, sendOnce, sentLine } from "./send-dedupe.ts";
+import { holdLock } from "./checkpoint-lock.ts";
+import { duplicateLine, SEND_DUPLICATE_EXIT, type Sent, type SendOnceResult, sendKey, sendOnce, sentLine } from "./send-dedupe.ts";
 import { join } from "node:path";
 
 const PHASES: ReadonlySet<string> = new Set(["start", "update", "stop"]);
@@ -21,9 +22,17 @@ const gateway = (cli: Cli): Gateway => new Gateway(unixConnector, realClock, soc
 // A new message (post, question, receipt) goes out once per conversation and content, as every dori send does
 // (src/send-dedupe.ts: SEND_DUPLICATE, exit 3, --again sends it once more); status rows and edits change a message in place
 // and are never checked (review 2 of #511: upstream #255's op_id stops only a retry inside one call).
+// One new message at a time per conversation (review 3 of #511): a gateway send can retry for about 65 s, longer than
+// sendOnce's 60 s claim, and its ids are UUIDs that the last-post record orders by the time a send finished. Held for the
+// whole send, the conversation's lock (checkpoint-lock.ts: a flock, freed when its holder dies, never taken over by age)
+// lets no second send take over a running claim, and records posts in the order the gateway got them.
+const SEND_WAIT_MS = 5 * 60_000;
+export const gatewayOnce = (stateDir: string, place: string, parts: readonly string[], send: () => Promise<Sent>, opts: { readonly again?: boolean; readonly now?: () => number } = {}): Promise<SendOnceResult> =>
+  holdLock(join(stateDir, "sent", `gateway-${sendKey([place])}.lock`), "gateway send", place, () => sendOnce(join(stateDir, "sent"), place, sendKey([place, ...parts]), send, opts), SEND_WAIT_MS);
+
 const once = async (cli: Cli, parts: readonly string[], send: () => Promise<Sent>): Promise<string | undefined> => {
   const place = `gateway:${socketOf(cli)}`;
-  const r = await sendOnce(join(cli.config.stateDir, "sent"), place, sendKey([place, ...parts]), send, { again: Boolean(cli.flags.values.again) });
+  const r = await gatewayOnce(cli.config.stateDir, place, parts, send, { again: Boolean(cli.flags.values.again) });
   if (!r.duplicate) return r.id;
   console.log(duplicateLine(place, r));
   process.exitCode = SEND_DUPLICATE_EXIT;
@@ -37,7 +46,7 @@ const rowsOf = (cli: Cli): WorkRow[] =>
     const state = row.slice(0, at);
     const label = row.slice(at + 1).trim();
     if (at < 0 || !STATES.has(state) || !label) die(`--row must be running|done|failed:<label>, got ${JSON.stringify(row)}`);
-    return { id: `r${i + 1}`, label, state: state as WorkRow["state"] };
+    return { id: `r${i + 1}`, label: cli.postable(label, "send"), state: state as WorkRow["state"] };
   });
 
 /** `--line "Total=12,000 KRW"`: one receipt line, split at the first `=`. */
@@ -45,7 +54,7 @@ const linesOf = (cli: Cli) =>
   cli.many("line").map((line) => {
     const at = line.indexOf("=");
     if (at <= 0 || at === line.length - 1) die(`--line must be <label>=<value>, got ${JSON.stringify(line)}`);
-    return { label: line.slice(0, at).trim(), value: line.slice(at + 1).trim() };
+    return { label: cli.postable(line.slice(0, at).trim(), "send"), value: cli.postable(line.slice(at + 1).trim(), "send") };
   });
 
 export const sendGateway = async (cli: Cli): Promise<void> => {
@@ -61,13 +70,15 @@ export const sendGateway = async (cli: Cli): Promise<void> => {
     if (!PHASES.has(phase)) die("--status takes start, update or stop, with gateway");
     console.log(`STATUS ${await gw.status(phase as StatusPhase, await text(), rowsOf(cli), opt("status-id"))}`);
   } else if (question !== undefined) {
-    const options = cli.many("option").map((label, i) => ({ id: `o${i + 1}`, label }));
+    const options = cli.many("option").map((label, i) => ({ id: `o${i + 1}`, label: postable(label, "send") }));
     if (!question) die("--question needs the question text");
     if (options.length < 2) die("--question needs at least two --option");
     const text = postable(question, "send");
     const id = await once(cli, ["question", text, ...options.map((o) => o.label)], async () => ({ id: await gw.question(text, options) }));
     if (id) console.log(`QUESTION ${id}`);
   } else if (receipt !== undefined) {
+    // every text the user sees goes through the literal-newline check (review 3 of #511), as --text does
+    postable(receipt, "send");
     const lines = linesOf(cli);
     const id = await once(cli, ["receipt", receipt, ...lines.flatMap((l) => [l.label, l.value])], async () => ({ id: await gw.receipt(receipt, lines) }));
     // the socket answers with no copy of what it stored, so the line says content=not-returned
