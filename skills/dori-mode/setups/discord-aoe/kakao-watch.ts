@@ -3,10 +3,11 @@
 // Polls every known room, appends new messages to the inbox, prints one KAKAO_MSG line each for the lead's monitor and
 // marks them read. --once performs one tick and exits; --mark-read <chat> <log id> is the one-session mark a tick runs;
 // --refresh renews the stored login with its refresh token, as a tick runs it once the login has expired.
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { envFilePath, loadEnvFile, resolveInstance } from "../../scripts/src/config.ts";
+import { appendInboxRow } from "../../scripts/src/inbox-append.ts";
 import { run, type Ran, type Runner } from "../../scripts/src/run.ts";
 import { pruneKakaoProof, rememberKakaoProof, startKakaoProofSocket, type KakaoProofRow } from "./kakao-proof.ts";
 export { handleKakaoProofRequest, lookupKakaoProof, normalizeKakaoQuote, startKakaoProofSocket } from "./kakao-proof.ts";
@@ -326,7 +327,7 @@ async function authReply(o: KakaoOptions, s: KakaoState, r: Ran, runner: Runner,
   const line = `KAKAO_AUTH_EXPIRED after ${n} invalid access token replies in a row, refresh failed (${why}): polling stopped until the login file changes`;
   log(line);
   const content = `${line}. The watcher makes no KakaoTalk call until someone signs the account in again as root; it then polls again by itself. Pass this on in the pair channel to the Dori that handles the KakaoTalk login.`;
-  appendFileSync(o.inbox, `${JSON.stringify({ ts, id: `kakao-auth-expired-${ts}`, kind: "kakao-auth-expired", content })}\n`);
+  appendInboxRow(o.inbox, { ts, id: `kakao-auth-expired-${ts}`, kind: "kakao-auth-expired", content });
   return true;
 }
 
@@ -441,7 +442,7 @@ export async function kakaoTick(o: KakaoOptions, s: KakaoState, runner: Runner, 
         sent_at: m.sent_at,
         mentions_self: o.mention ? o.mention.test(text) : false,
       };
-      appendFileSync(o.inbox, `${JSON.stringify(row)}\n`);
+      appendInboxRow(o.inbox, row);
       // A post without text cannot be the owner's instruction, so it never becomes a proof.
       if (text.trim()) rememberKakaoProof(s.proofRecords, row, now() / 1000);
       log(`KAKAO_MSG ${name} ${m.log_id} ${m.author_name ?? author}: ${text.trim() ? text.slice(0, 120).replace(/\n/g, " ") : "[no text]"}`);

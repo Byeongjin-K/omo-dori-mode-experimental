@@ -356,8 +356,34 @@ def main():
 run(main)
 '''
 
-# Appends the line on stdin to the account's lead inbox (a regular file under its home).
+# Appends the line on stdin to the account's lead inbox (a regular file under its home), holding <inbox>.lock as every
+# other inbox writer does (src/inbox-append.ts appendInboxRow and its takeLock): no other writer's bytes land between this
+# line's, and an append cut back after a failed write never takes this line with it (review 7 of #509). Same protocol:
+# flock, then the path must still name the file locked (a release removes it while holding it), and the release removes
+# it again. Waited for up to 5 s, then the delivery fails and is retried.
 INBOX = COMMON + r'''
+import fcntl, signal
+
+def late(*_):
+    raise TimeoutError("inbox append locked")
+
+def lock_inbox(lock):
+    signal.signal(signal.SIGALRM, late)
+    signal.alarm(5)
+    try:
+        while True:
+            fd = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                if os.path.exists(lock) and os.stat(lock).st_ino == os.fstat(fd).st_ino:
+                    return fd
+            except BaseException:
+                os.close(fd)
+                raise
+            os.close(fd)
+    finally:
+        signal.alarm(0)
+
 def main():
     path = sys.argv[4]
     _, home = home_fd()
@@ -366,13 +392,22 @@ def main():
     if not os.path.realpath(path).startswith(os.path.realpath(home) + "/"):
         raise Refused("inbox-outside-home")
     line = sys.stdin.buffer.read()
-    f = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    lock = path + ".lock"
+    held = lock_inbox(lock)
     try:
-        if not stat.S_ISREG(os.fstat(f).st_mode):
-            raise Refused("inbox-not-a-regular-file")
-        os.write(f, line)
+        f = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        try:
+            if not stat.S_ISREG(os.fstat(f).st_mode):
+                raise Refused("inbox-not-a-regular-file")
+            os.write(f, line)
+        finally:
+            os.close(f)
     finally:
-        os.close(f)
+        try:
+            os.unlink(lock)
+        except FileNotFoundError:
+            pass
+        os.close(held)
     sys.stderr.write("APPENDED\n")
 
 run(main)

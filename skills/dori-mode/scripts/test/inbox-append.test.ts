@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { readFileSync, statSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { appendFileSync, mkdirSync, readFileSync, statSync, truncateSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 import { takeLock } from "../src/checkpoint-lock.ts";
 import { appendInboxRow, inboxRows } from "../src/inbox-append.ts";
@@ -93,5 +93,51 @@ try {
   expect(rows(inbox)).toEqual([B]);
   release();
   expect(await child()).toBe("written");
+  expect(rows(inbox)).toEqual([B, C]);
+});
+
+// review 7 of #509: the setup writers outside src appended without <inbox>.lock, so an append taken back to its size
+// (above) cut off a row one of them had written whole after its bytes. Each Python writer is run while this process holds
+// the lock with half an append written; once it comes to the lock (its flock prints AT_LOCK first) or has written without
+// it and left, the append is taken back and the lock let go. The relay's inbox helper runs here as the relay boots it.
+const SETUPS = join(import.meta.dir, "../../setups/discord-aoe");
+const LOAD = "import fcntl, importlib.machinery as m, importlib.util as u, io, json, sys; flock = fcntl.flock; said = []; fcntl.flock = lambda fd, op: (said or (said.append(1), print('AT_LOCK', flush=True)), flock(fd, op))[1]; l = m.SourceFileLoader('w', sys.argv[1]); mod = u.module_from_spec(u.spec_from_loader('w', l)); l.exec_module(mod); row = json.loads(sys.argv[2]); ";
+const setupWriters: Record<string, (inbox: string, row: unknown) => { cmd: string[]; env: Record<string, string> }> = {
+  "upstream-watch.py": (inbox, row) => ({ cmd: ["/usr/bin/python3", "-I", "-B", "-c", `${LOAD}mod.append_inbox(row)`, join(SETUPS, "upstream-watch.py"), JSON.stringify(row)], env: { UPSTREAM_WATCH_INBOX: inbox } }),
+  "dori-file-relay": (inbox, row) => ({
+    cmd: ["/usr/bin/python3", "-I", "-B", "-c", `${LOAD}sys.argv = ['boot', '0', 'inbox', sys.argv[3], sys.argv[4]]; sys.stdin = io.TextIOWrapper(io.BytesIO((json.dumps(row) + '\\n').encode())); exec(compile(mod.INBOX.replace('@MAX_PARTS@', '2').replace('@MAX_DEPTH@', '0'), 'inbox', 'exec'), {})`, join(SETUPS, "dori-file-relay"), JSON.stringify(row), dirname(dirname(inbox)), inbox],
+    env: {},
+  }),
+};
+// the child's output up to AT_LOCK, or all of it once it has left; the pipe stays open for the child
+const untilLock = async (out: ReadableStream<Uint8Array>): Promise<string> => {
+  const reader = out.getReader();
+  const dec = new TextDecoder();
+  let seen = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    seen += dec.decode(value, { stream: true });
+    if (seen.includes("AT_LOCK")) break;
+  }
+  reader.releaseLock();
+  return seen;
+};
+
+test.each(Object.keys(setupWriters))("%s appends under <inbox>.lock: it waits while an append is cut back, and its row then goes in whole", async (name) => {
+  const inbox = join(state.dir, "za", ".za", "inbox.jsonl");
+  mkdirSync(join(state.dir, "za", ".za"), { recursive: true });
+  appendInboxRow(inbox, B);
+  const before = statSync(inbox).size;
+  const release = takeLock(`${inbox}.lock`, Date.now(), "inbox append", inbox);
+  appendFileSync(inbox, '{"id":"7009","content":"cut'); // an append's bytes half written when the disk filled
+  const w = setupWriters[name]!(inbox, C);
+  const p = Bun.spawn(w.cmd, { env: { PATH: "/usr/bin:/bin", ...w.env }, stdout: "pipe", stderr: "pipe" });
+  // the writer comes to the lock, or (without it) has already written and left
+  expect(await untilLock(p.stdout)).toContain("AT_LOCK");
+  truncateSync(inbox, before); // the append is taken back, as appendInboxRow does when its write fails part way
+  release();
+  const [code, err] = [await p.exited, await new Response(p.stderr).text()];
+  expect({ code, err: code === 0 ? "" : err }).toEqual({ code: 0, err: "" });
   expect(rows(inbox)).toEqual([B, C]);
 });

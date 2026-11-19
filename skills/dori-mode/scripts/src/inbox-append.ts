@@ -4,7 +4,8 @@ import { dirname } from "node:path";
 import { CheckpointError, takeLock } from "./checkpoint-lock.ts";
 
 // One JSON row appended to an inbox file: the Discord listener's own messages, the lead's notices (backlog, guard), the
-// directive and rollover audits and the handover probe all go through here.
+// directive and rollover audits, the handover probe, and the Slack and KakaoTalk watchers all go through here; the two
+// Python setup writers (upstream-watch.py, dori-file-relay's inbox helper) take the same <inbox>.lock the same way.
 // - Private as the listener makes it: a folder made here is 0700, a file 0600, so a guard that writes first leaves no inbox
 //   other accounts can read (review 5 of #509).
 // - Whole rows only: every append holds <inbox>.lock (flock(2), takeLock) for its write and nothing else, so no other writer
