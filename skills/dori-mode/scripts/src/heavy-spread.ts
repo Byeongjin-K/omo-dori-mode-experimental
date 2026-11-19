@@ -217,6 +217,8 @@ type HelperTry = { readonly kind: "started"; readonly run: Started } | { readonl
 const VERDICT = /^WORKER_(ADMIT|BUSY|REFUSED)\b ?(.*)$/;
 
 export const startExec = async (ctx: HeavyCtx, h: HeavyHelper, job: SpreadJob, plan: Extract<Plan, { ok: true }>, below: number): Promise<HelperTry> => {
+  const full = await ctx.deps.disk?.(); // under guard.diskFreeCritGb no job goes out either: its archive, log and files back are this host's
+  if (full) return { kind: "busy", why: full };
   const a = job.assets ? await job.assets.get(plan.sync) : plan.sync.length ? { why: "its --sync paths have no archive (heavy-assets.ts stager), and nothing else may send them" } : undefined; // the --sync paths as one archive, listed and checked by the one builder (heavy-assets.ts), its sha256 checked there; a helper that does not know assets= is out of date (helperVerdict: old)
   if (a && "why" in a) return { kind: "refused", why: a.why };
   const args = execWords(job, plan, below, a && assetsWord(a));
@@ -224,8 +226,7 @@ export const startExec = async (ctx: HeavyCtx, h: HeavyHelper, job: SpreadJob, p
   const reader = p.stderr.getReader();
   const lines = readerLines(reader);
   const staleMs = (ctx.q.staleMin ?? 20) * 60_000;
-  // the admission too has staleMin at most: an ssh that connects and never answers is down, not waited on
-  const { said: verdict, last, answered } = await firstAnswer(p, lines, VERDICT, staleMs);
+  const { said: verdict, last, answered } = await firstAnswer(p, lines, VERDICT, staleMs); // the admission too has staleMin at most: an ssh that connects and never answers is down, not waited on
   if (verdict?.[1] !== "ADMIT") {
     await letGo(p, reader, answered ? STALE_GRACE_MS : 0);
     if (!answered) return { kind: "down", why: `no answer to the admission within ${staleMs / 60_000} min (heavyQueue.staleMin)` };
@@ -243,8 +244,7 @@ export const startExec = async (ctx: HeavyCtx, h: HeavyHelper, job: SpreadJob, p
   });
   let exit: number | undefined;
   let tooBig = false;
-  // O <line>: the command's stdout, E <line>: its stderr, WORKER_EXIT <code> at the end, WORKER_ALIVE a heartbeat, anything else: the helper's lines
-  const forward = (async () => {
+  const forward = (async () => { // O <line>: the command's stdout, E <line>: its stderr, WORKER_EXIT <code> at the end, WORKER_ALIVE a heartbeat, anything else: the helper's lines
     for (let n = await lines.next(); !n.done; n = await lines.next()) {
       const l = n.value;
       watch.heard();

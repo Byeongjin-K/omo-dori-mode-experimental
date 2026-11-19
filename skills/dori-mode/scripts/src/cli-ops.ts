@@ -29,6 +29,7 @@ import type { Command } from "./cli-context.ts";
 import { die, every } from "./cli-context.ts";
 import { makeDiscordDeps } from "./cli-deps-discord.ts";
 import { makeDirectiveDeps } from "./cli-deps-directives.ts";
+import { flockDir } from "./backlog.ts";
 
 const notifyChangeCommand: Command = async (context) => {
   const { flags, config, need } = context;
@@ -138,7 +139,10 @@ const guardCommand: Command = async (context) => {
   const minutes = loopMinutes();
   console.log("HOST_GUARD_READY");
   await every(minutes, async () => {
-    for (const line of [...(await guardPass(await sampleHost(run, config), config.guard, state, deps)), ...outsideLines(await sampleOutside(run), outside)]) console.log(line);
+    // one guard pass at a time per state dir (the dori-lanes loop and a one-shot dori guard), so one alert is told once
+    const held = await flockDir(`${statePath}.lock`, 0);
+    const lines = held ? await guardPass(await sampleHost(run, config), config.guard, state, deps).finally(held.release) : [`HOST_GUARD_SKIPPED another guard pass holds ${statePath}.lock`];
+    for (const line of [...lines, ...outsideLines(await sampleOutside(run), outside)]) console.log(line);
   });
   return;
 };

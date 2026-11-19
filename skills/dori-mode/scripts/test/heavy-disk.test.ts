@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, expect, setDefaultTimeout, test } from "bun:test";
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { linesOf } from "../src/heavy-queue.ts";
-import { acquireSlot, admitOnce, releaseSlot } from "../src/heavy-slot.ts";
+import { acquire, acquireSlot, admitOnce, releaseSlot, type SlotDeps } from "../src/heavy-slot.ts";
+import { startExec } from "../src/heavy-spread.ts";
 import { withState } from "./fakes.ts";
 
 setDefaultTimeout(30_000); // load-proof: each case starts the real CLI, and the running job a systemd scope, as child processes
@@ -91,4 +92,44 @@ test("a job already waiting in line does not start while the disk is under the f
   expect(lines.at(-1)).toStartWith("HEAVY_ADMIT waiting slot.1");
   expect(polls).toBe(3);
   releaseSlot(slot);
+});
+
+const FULL = "disk free 5.0 GB < guard.diskFreeCritGb 10 GB on this host";
+const slotDeps = (disk: () => Promise<string | undefined>, sleep: () => Promise<void> = () => new Promise((r) => setImmediate(r))): SlotDeps => ({ dir: join(state.dir, "heavy"), slots: 1, maxLoad: 80, clock: { now: () => Date.now(), sleep }, pid: process.pid, load: async () => 1, alive: () => true, disk });
+
+test("under guard.diskFreeCritGb a waiting job is not sent to a helper either, and no job goes out through startExec", async () => {
+  let full: string | undefined = FULL;
+  let polls = 0;
+  let offered = 0;
+  const deps = slotDeps(async () => full, async () => { if (++polls === 3) full = undefined; });
+  // a held slot here, so with room the job goes elsewhere
+  const held = await acquireSlot({ ...deps, disk: async () => undefined }, "holder");
+  const got = await acquire(deps, "spread", { pollMs: 1, elsewhere: async () => { offered++; return full ? "sent while full" : "sent"; } });
+  expect(got).toEqual({ elsewhere: "sent" });
+  expect(offered).toBe(1);
+  releaseSlot(held);
+  // the remote dispatch of --kind jobs and batch items says busy before it stages anything
+  const job = { label: "x", kind: "cpu" as const, cmd: ["true"], cwd: state.dir, sync: [], env: {} };
+  expect(await startExec({ q: { jobs: {}, helpers: [], queue: [], rl: true, jobDir: state.dir, exec: true, execMaxMin: 5 }, deps: slotDeps(async () => FULL) }, { name: "h", ssh: ["false"] }, job, { ok: true, sync: [], needs: [], which: [] }, 100)).toEqual({ kind: "busy", why: FULL });
+});
+
+test("the owner's transcription passes the disk floor: at dori heavy --job and past jobs that wait for room", async () => {
+  const { env, freeGb } = setup();
+  freeGb(5);
+  const cli = Bun.spawn([process.execPath, CLI, "heavy", "voice", "--job", "transcribe"], { env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+  const [, err] = [await cli.exited, await new Response(cli.stderr).text()];
+  expect(err).not.toContain("diskFreeCritGb");
+  // Given: a job waiting in line for room; When: the transcription asks; Then: it takes the slot first
+  let full: string | undefined = FULL;
+  const deps = slotDeps(async () => full);
+  const waiting = acquire(deps, "waiting", { pollMs: 1 });
+  const queue = join(state.dir, "heavy", "queue");
+  while (!existsSync(queue) || !readdirSync(queue).length) await new Promise((r) => setImmediate(r));
+  const owner = await acquire(deps, "voice", { pollMs: 1, holdExempt: true });
+  expect("slot" in owner).toBe(true);
+  if ("slot" in owner) releaseSlot(owner.slot);
+  full = undefined;
+  const w = await waiting;
+  if ("slot" in w) releaseSlot(w.slot);
+  expect("slot" in w).toBe(true);
 });

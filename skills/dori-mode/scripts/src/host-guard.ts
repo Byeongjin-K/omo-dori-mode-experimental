@@ -198,6 +198,8 @@ export const readGuardState = (path: string): GuardState => {
 // restarted guard does not tell it again. A failed write is a HOST_GUARD WAKE_FAIL line; the rows wait in order (an ALERT
 // is never dropped for the CLEAR after it) and are tried again next pass, as is a state file that could not be written.
 export const guardPass = async (s: HostSample, t: GuardThresholds, state: GuardState, deps: GuardDeps): Promise<string[]> => {
+  // what another guard process told is in the file: read it, unless this process's own last write of it failed
+  if (!state.unsaved) Object.assign(state, { pending: undefined }, readGuardState(deps.statePath));
   const before = new Set(state.alerting ? state.kinds : []);
   const saved = (): string => JSON.stringify({ alerting: state.alerting, kinds: state.kinds, told: state.told, ...(state.pending?.length ? { pending: state.pending } : {}) });
   const was = saved();

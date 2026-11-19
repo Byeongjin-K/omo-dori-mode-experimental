@@ -175,10 +175,12 @@ export const acquire = async <T>(deps: SlotDeps, label: string, opts: AcquireOpt
       // a hold on this host (dori heavy hold-local, heavy-hold.ts) is read before every try, so a job that waited here
       // when it came on does not take a slot that frees during it
       const holdNow = opts.helpersOnly ? undefined : deps.hold?.();
-      const ahead = ticket && !(opts.holdExempt && holdNow) ? names.slice(0, Math.max(0, names.indexOf(basename(ticket)))) : [];
+      // the disk floor (guard.diskFreeCritGb) is read before every try too: nothing new starts from this host, here or on a
+      // helper; the owner's transcription passes it as it passes a hold, also past jobs waiting for it
+      const diskNow = opts.helpersOnly ? undefined : await deps.disk?.();
+      const ahead = ticket && !(opts.holdExempt && (holdNow || diskNow)) ? names.slice(0, Math.max(0, names.indexOf(basename(ticket)))) : [];
       const before = opts.helpersOnly ? "--helpers-only" : opts.holdExempt ? undefined : holdNow;
-      // the disk floor is read before every try too; the owner's transcription passes it as it passes a hold
-      const full = before || opts.helpersOnly || opts.holdExempt ? undefined : await deps.disk?.();
+      const full = before || opts.holdExempt ? undefined : diskNow;
       const tried: Try | null = before ? { wait: "hold", why: before } : full ? { wait: "disk", why: full } : ahead.length ? { wait: "queue", why: `${ahead.length} job(s) ahead in the queue` } : await admitUnheld(deps, () => tryAdmit(deps, label, opts.memKb, opts.settleSec), Boolean(opts.holdExempt));
       const held = tried && "wait" in tried && tried.wait === "hold" ? tried.why : undefined;
       const t: Try | null = held ? { wait: `hold ${local}`, why: held } : tried;
@@ -191,7 +193,7 @@ export const acquire = async <T>(deps: SlotDeps, label: string, opts: AcquireOpt
         deps.log?.(held ? heldLine(label, held, local, Boolean(opts.helpersOnly)) : `HEAVY_WAIT ${label}: ${t.why}`);
         waiting = t.wait;
       }
-      if (t && opts.elsewhere && !local && (localOnlyAhead || (t.wait !== "queue" && (t.wait !== "settle" || opts.elsewhereWhileSettling)))) {
+      if (t && t.wait !== "disk" && opts.elsewhere && !local && (localOnlyAhead || (t.wait !== "queue" && (t.wait !== "settle" || opts.elsewhereWhileSettling)))) {
         const got = await opts.elsewhere(t.why);
         if (got !== null) return { elsewhere: got };
       }

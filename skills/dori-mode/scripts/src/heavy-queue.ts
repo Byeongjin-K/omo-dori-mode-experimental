@@ -13,6 +13,9 @@ import { acquire, releaseSlot, type SlotDeps } from "./heavy-slot.ts";
 // queue host cannot be reached.
 
 // noShip: heavyNoShip for an archive heavySpread makes itself (heavy-upload.ts; unset: ~/data)
+// the owner's transcription: a hold (dori heavy hold-local) and the disk floor (guard.diskFreeCritGb) let it through
+export const holdExemptJob = (kind: string): boolean => kind === "transcribe";
+
 export type HeavyCtx = { readonly q: HeavyQueue; readonly deps: SlotDeps; readonly noShip?: readonly string[] };
 
 export class HeavyJobError extends Error {}
@@ -129,7 +132,7 @@ export const runQueued = async (ctx: HeavyCtx, req: JobRequest, dir: string): Pr
   if (exempt) log(`HEAVY_HOLD_EXEMPT ${req.label}: the owner's transcription (--job transcribe) runs here under the hold ${exempt}`);
   const since = ctx.deps.clock.now();
   for (;;) {
-    const got = await acquire<Started>(ctx.deps, req.label, { since, elsewhere: helpers, ...(req.kind === "transcribe" ? { holdExempt: true } : {}) });
+    const got = await acquire<Started>(ctx.deps, req.label, { since, elsewhere: helpers, ...(holdExemptJob(req.kind) ? { holdExempt: true } : {}) });
     if ("slot" in got) {
       try {
         const r = await runJob(job, dir, req.args, { label: req.label, free: ctx.deps.headroom?.free ?? 10, gpuFreeKb: ctx.deps.headroom?.gpuFreeKb ?? 0, ...(ctx.deps.log ? { log: ctx.deps.log } : {}) });

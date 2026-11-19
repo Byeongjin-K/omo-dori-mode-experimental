@@ -107,6 +107,14 @@ test("a state file that could not be written is written on a later pass even whe
   expect(h.rows).toHaveLength(1);
 });
 
+test("a second guard process with stale memory does not tell the lead an alert the first one told", async () => {
+  const h = harness();
+  // the dori-lanes loop and a one-shot dori guard, each with its own memory, one state file
+  await guardPass(sample(10), t, { alerting: false }, h.deps);
+  await guardPass(sample(10), t, { alerting: false }, h.deps);
+  expect(h.rows).toHaveLength(1);
+});
+
 test("the largest folders come with their account and size, biggest first, and what cannot be read is named", async () => {
   // Given: two roots and one that is not there; a folder with a part nobody but root reads
   const a = join(state.dir, "tmp");
