@@ -12,7 +12,7 @@ import { announceChange } from "./update-announce.ts";
 import { deadPaneTick, newDeadPaneState } from "./dead-panes.ts";
 import { watchTick } from "./done-flow.ts";
 import { leadNow } from "./hc-pane.ts";
-import { guardTick, outsideLines, sampleHost, sampleOutside } from "./host-guard.ts";
+import { diskTops, guardPass, guardStatePath, outsideLines, readGuardState, sampleHost, sampleOutside } from "./host-guard.ts";
 import { areaLabel, type AreaQuery, areaSignals, formatSignals } from "./lane-signals.ts";
 import { statusOf } from "./registry.ts";
 import { bootCheck, envSlackCheck } from "./boot.ts";
@@ -28,6 +28,7 @@ import { transcribe } from "./messenger/voice.ts";
 import type { Command } from "./cli-context.ts";
 import { die, every } from "./cli-context.ts";
 import { makeDiscordDeps } from "./cli-deps-discord.ts";
+import { makeDirectiveDeps } from "./cli-deps-directives.ts";
 
 const notifyChangeCommand: Command = async (context) => {
   const { flags, config, need } = context;
@@ -129,11 +130,15 @@ const deadPanesCommand: Command = async (context) => {
 
 const guardCommand: Command = async (context) => {
   const { loopMinutes, config } = context;
-  const state = { alerting: false, outside: new Set<number>() };
+  const statePath = guardStatePath(config.stateDir);
+  const state = readGuardState(statePath);
+  const outside = new Set<number>();
+  const { leadInbox } = makeDirectiveDeps(context);
+  const deps = { statePath, now: () => Date.now(), tops: () => diskTops(run), inbox: leadInbox };
   const minutes = loopMinutes();
   console.log("HOST_GUARD_READY");
   await every(minutes, async () => {
-    for (const line of [...guardTick(await sampleHost(run, config), config.guard, state), ...outsideLines(await sampleOutside(run), state.outside)]) console.log(line);
+    for (const line of [...(await guardPass(await sampleHost(run, config), config.guard, state, deps)), ...outsideLines(await sampleOutside(run), outside)]) console.log(line);
   });
   return;
 };

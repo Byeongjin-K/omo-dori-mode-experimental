@@ -35,6 +35,7 @@
     "loadOk": 80,
     "memFreeMinPct": 20,
     "diskFreeMinGb": 50,
+    "diskFreeCritGb": 10,
     "panesMax": 20
   },
   "hooks": {

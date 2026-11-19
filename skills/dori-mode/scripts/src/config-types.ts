@@ -38,6 +38,8 @@ export type GuardThresholds = {
   readonly loadOk: number;
   readonly memFreeMinPct: number;
   readonly diskFreeMinGb: number;
+  // under it dori heavy takes no new job on this host (host-guard.ts diskCritWhy; 0: off)
+  readonly diskFreeCritGb: number;
   readonly panesMax: number;
 };
 

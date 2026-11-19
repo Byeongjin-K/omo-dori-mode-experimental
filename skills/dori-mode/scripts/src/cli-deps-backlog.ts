@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { resolveLeadModel } from "./lane-model.ts";
 import { homedir, userInfo } from "node:os";
 import { join } from "node:path";
@@ -17,14 +17,9 @@ import { makeDiscordDeps } from "./cli-deps-discord.ts";
 
 export const makeBacklogDeps = (cli: Pick<Cli, "config" | "deps" | "discordToken">) => {
   const { config, deps, discordToken } = cli;
-  const { auditInbox } = makeDirectiveDeps(cli);
-  const { ownDiscord, idList } = makeDiscordDeps(cli);
   // dori backlog: a pass starts an item through the same launch as dori launch and tells the lead in its inbox
-  const backlogInbox = (kind: string, id: string, content: string): void => {
-    const inbox = auditInbox();
-    mkdirSync(join(inbox, ".."), { recursive: true });
-    appendFileSync(inbox, `${JSON.stringify({ ts: new Date().toISOString(), id, kind, content })}\n`);
-  };
+  const { auditInbox, leadInbox: backlogInbox } = makeDirectiveDeps(cli);
+  const { ownDiscord, idList } = makeDiscordDeps(cli);
   // the lead's model the last quota check chose: the launch right after it starts on that same model
   let chosen: string | undefined;
   const backlogDeps = (): TickDeps => ({
