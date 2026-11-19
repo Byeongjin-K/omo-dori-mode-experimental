@@ -1,6 +1,7 @@
 // dori handover: move the lead to a new agent session without losing work, monitors or notifications.
 // Order: write the note -> open the new session -> point leadPane, lanes and cards at it -> check that its monitors run and
 // that a [REPORT] and an inbox event reach it -> only then close the old session. A failed check moves everything back.
+import { appendInboxRow } from "./inbox-append.ts";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -583,9 +584,8 @@ export const verify = async (deps: HandoverDeps, facts: HandoverFacts, to: Targe
   // the probes go in once the new lead's first turn (reading the note) has ended, as a lane's does (lane-handover.ts verifyLane)
   for (; i < tries && turnRunning(await captureTmux(deps.run, to.pane)); i++) await deps.clock.sleep(POLL_MS);
   if (i >= tries) return { reasons: [`the first turn of ${to.pane} was still running after ${verifyMin} min; the probes were not sent`], session };
-  const line = `[REPORT] handover-probe | milestone | ${PROBE} ${report}: run ${ack(report)}`;
-  if (!(await sendVerified(deps.run, deps.clock, deps.config, routed, line))) return { reasons: [`the report probe did not reach ${routed}`], session };
-  appendFileSync(deps.inbox, `${JSON.stringify({ ts: iso(deps.clock), id: `handover-${inbox}`, scope: "channel", kind: "handover-probe", content: `${PROBE} ${inbox}: run ${ack(inbox)}` })}\n`);
+  if (!(await sendVerified(deps.run, deps.clock, deps.config, routed, `[REPORT] handover-probe | milestone | ${PROBE} ${report}: run ${ack(report)}`))) return { reasons: [`the report probe did not reach ${routed}`], session };
+  appendInboxRow(deps.inbox, { ts: iso(deps.clock), id: `handover-${inbox}`, scope: "channel", kind: "handover-probe", content: `${PROBE} ${inbox}: run ${ack(inbox)}` });
   emit(`HANDOVER_PROBES_SENT report=${report} inbox=${inbox} (${deps.inbox})`);
   let problems: string[] = [];
   for (; i < tries; i++) {

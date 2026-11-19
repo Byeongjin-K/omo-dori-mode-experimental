@@ -1,5 +1,6 @@
+import { appendInboxRow } from "./inbox-append.ts";
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join } from "node:path";
 
 import { laneSessionFiles, readLeadRelays, type ReportLine } from "./auto-signals.ts";
@@ -304,8 +305,7 @@ const auditLedger = (deps: Pick<FlowDeps, "config">): Ledger => (deps.config.dir
 const toInbox = (inbox: string, deps: Pick<FlowDeps, "clock">, content: string): void => {
   if (!inbox) return;
   const ts = iso(deps.clock);
-  mkdirSync(dirname(inbox), { recursive: true });
-  appendFileSync(inbox, `${JSON.stringify({ ts, id: `directive-audit-${ts}`, kind: "directive-audit", content })}\n`);
+  appendInboxRow(inbox, { ts, id: `directive-audit-${ts}`, kind: "directive-audit", content });
 };
 
 // Each line in the watch log, the summary in the lead's inbox and typed to the lead; the last line says whether it got there.

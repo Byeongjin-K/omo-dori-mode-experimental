@@ -17,6 +17,7 @@
 // stage "reported"). No gap: no row. The gaps of risk HIGH or MEDIUM (and every todo, goal and monitor) go to the new session
 // once through the same supplement path the handover uses, asking it to write what only the conversation held into the
 // cwd's AGENTS.md or its memory; the check after its ack decides "fixed". Rows hold a short summary, never a secret value.
+import { appendInboxRow } from "./inbox-append.ts";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { closeFrozen, readFrozen } from "./frozen.ts";
 import { basename, dirname, join } from "node:path";
@@ -569,8 +570,7 @@ export const auditSummary = (stateDir: string, now: number, days = 7): string =>
 export const sendAuditSummary = (deps: { readonly config: LaneHandoverDeps["config"]; readonly clock: LaneHandoverDeps["clock"] }, inbox: string, week: string): string => {
   const now = deps.clock.now();
   const content = auditSummary(deps.config.stateDir, now);
-  mkdirSync(dirname(inbox), { recursive: true });
-  appendFileSync(inbox, `${JSON.stringify({ ts: new Date(now).toISOString(), id: `rollover-audit-${week}`, kind: "rollover-audit", content })}\n`);
+  appendInboxRow(inbox, { ts: new Date(now).toISOString(), id: `rollover-audit-${week}`, kind: "rollover-audit", content });
   mkdirSync(join(deps.config.stateDir, "handover"), { recursive: true });
   writeFileSync(weeklyFile(deps.config.stateDir), JSON.stringify({ week, at: new Date(now).toISOString(), inbox }));
   const line = `ROLLOVER_AUDIT_WEEKLY ${week} -> ${inbox}: ${content}`;

@@ -1,6 +1,7 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { appendInboxRow } from "./inbox-append.ts";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { checkedLedger, DirectiveError, type Ledger } from "./directives.ts";
 import { memoryRepoFor } from "./directive-audit.ts";
 import type { Cli } from "./cli-context.ts";
@@ -37,9 +38,7 @@ export const makeDirectiveDeps = (cli: Pick<Cli, "config" | "discordToken" | "de
   const auditInbox = (): string => config.handover.inbox || process.env["DORI_DISCORD_INBOX"]?.trim() || join(config.stateDir, "discord", "inbox.jsonl");
   // one row for the lead in that inbox, its kind telling what it is (backlog-start, backlog-ask, host-guard, ...)
   const leadInbox = (kind: string, id: string, content: string): void => {
-    const inbox = auditInbox();
-    mkdirSync(dirname(inbox), { recursive: true });
-    appendFileSync(inbox, `${JSON.stringify({ ts: new Date().toISOString(), id, kind, content })}\n`);
+    appendInboxRow(auditInbox(), { ts: new Date().toISOString(), id, kind, content });
   };
   // why a Discord message link is not the owner's word (his account or his registered webhook), or undefined when it is
   const ownerLinkProblem = async (url: string, maxAgeMs?: number): Promise<string | undefined> => {
