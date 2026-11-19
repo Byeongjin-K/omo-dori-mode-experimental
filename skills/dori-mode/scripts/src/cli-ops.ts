@@ -1,3 +1,4 @@
+import { mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { paneLife } from "./aoe.ts";
@@ -29,7 +30,7 @@ import type { Command } from "./cli-context.ts";
 import { die, every } from "./cli-context.ts";
 import { makeDiscordDeps } from "./cli-deps-discord.ts";
 import { makeDirectiveDeps } from "./cli-deps-directives.ts";
-import { flockDir } from "./backlog.ts";
+import { CheckpointError, takeLock } from "./checkpoint-lock.ts";
 
 const notifyChangeCommand: Command = async (context) => {
   const { flags, config, need } = context;
@@ -139,9 +140,18 @@ const guardCommand: Command = async (context) => {
   const minutes = loopMinutes();
   console.log("HOST_GUARD_READY");
   await every(minutes, async () => {
-    // one guard pass at a time per state dir (the dori-lanes loop and a one-shot dori guard), so one alert is told once
-    const held = await flockDir(`${statePath}.lock`, 0);
-    const lines = held ? await guardPass(await sampleHost(run, config), config.guard, state, deps).finally(held.release) : [`HOST_GUARD_SKIPPED another guard pass holds ${statePath}.lock`];
+    // one guard pass at a time per state dir (the dori-lanes loop and a one-shot dori guard), so one alert is told once;
+    // takeLock is flock(2) itself (no flock binary, which macOS lacks), let go by the kernel if this process dies
+    let release: (() => void) | undefined;
+    let skipped = "";
+    try {
+      mkdirSync(dirname(statePath), { recursive: true });
+      release = takeLock(`${statePath}.lock`, Date.now(), "guard pass", statePath);
+    } catch (e) {
+      if (!(e instanceof CheckpointError)) throw e;
+      skipped = `HOST_GUARD_SKIPPED ${e.message}`;
+    }
+    const lines = release ? await guardPass(await sampleHost(run, config), config.guard, state, deps).finally(release) : [skipped];
     for (const line of [...lines, ...outsideLines(await sampleOutside(run), outside)]) console.log(line);
   });
   return;

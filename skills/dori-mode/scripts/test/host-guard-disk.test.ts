@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { defaultConfig } from "../src/config.ts";
@@ -113,6 +113,23 @@ test("a second guard process with stale memory does not tell the lead an alert t
   await guardPass(sample(10), t, { alerting: false }, h.deps);
   await guardPass(sample(10), t, { alerting: false }, h.deps);
   expect(h.rows).toHaveLength(1);
+});
+
+test("dori guard alerts and tells the lead on a host without the flock program (macOS)", async () => {
+  // Given: a PATH with every program of this host but flock(1), a memory floor every host is under (no du)
+  const bin = join(state.dir, "bin");
+  mkdirSync(bin);
+  for (const d of ["/usr/local/bin", "/usr/bin", "/bin"]) if (existsSync(d)) for (const n of readdirSync(d)) if (n !== "flock" && !existsSync(join(bin, n))) symlinkSync(join(d, n), join(bin, n));
+  const config = join(state.dir, "config.json");
+  writeFileSync(config, JSON.stringify({ stateDir: join(state.dir, "state"), guard: { memFreeMinPct: 101, diskFreeMinGb: 0, panesMax: 0 } }));
+  const env = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("DORI_"))), PATH: bin, DORI_CONFIG: config, DORI_ENV_FILE: join(state.dir, "none.env") };
+  // When
+  const p = Bun.spawn([process.execPath, join(import.meta.dir, "../src/cli.ts"), "guard"], { env, stdout: "pipe", stderr: "pipe" });
+  const [code, out] = [await p.exited, await new Response(p.stdout).text()];
+  // Then
+  expect(code).toBe(0);
+  expect(out).toContain("HOST_GUARD ALERT memory free");
+  expect(readFileSync(join(state.dir, "state", "discord", "inbox.jsonl"), "utf8")).toContain('"kind":"host-guard"');
 });
 
 test("the largest folders come with their account and size, biggest first, and what cannot be read is named", async () => {

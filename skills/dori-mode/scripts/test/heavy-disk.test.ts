@@ -133,3 +133,14 @@ test("the owner's transcription passes the disk floor: at dori heavy --job and p
   if ("slot" in w) releaseSlot(w.slot);
   expect("slot" in w).toBe(true);
 });
+
+test("a hold on this host does not let a job under the disk floor go to a helper (named jobs, --kind, heavy-serve)", async () => {
+  let full: string | undefined = FULL;
+  let polls = 0;
+  let offered = 0;
+  const deps = { ...slotDeps(async () => full, async () => { if (++polls === 3) full = undefined; }), hold: () => "until 09:00 by gongdori (QA)" };
+  // Given: a hold and the floor together; Then: offered only once the disk has room, while the hold still holds here
+  const got = await acquire(deps, "named", { pollMs: 1, elsewhere: async () => { offered++; return full ? "sent while full" : "sent"; } });
+  expect(got).toEqual({ elsewhere: "sent" });
+  expect([offered, polls]).toEqual([1, 3]);
+});

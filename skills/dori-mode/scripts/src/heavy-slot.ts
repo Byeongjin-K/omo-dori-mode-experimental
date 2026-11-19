@@ -193,7 +193,8 @@ export const acquire = async <T>(deps: SlotDeps, label: string, opts: AcquireOpt
         deps.log?.(held ? heldLine(label, held, local, Boolean(opts.helpersOnly)) : `HEAVY_WAIT ${label}: ${t.why}`);
         waiting = t.wait;
       }
-      if (t && t.wait !== "disk" && opts.elsewhere && !local && (localOnlyAhead || (t.wait !== "queue" && (t.wait !== "settle" || opts.elsewhereWhileSettling)))) {
+      // under the disk floor nothing leaves for a helper either, held or not: its files come back here (named jobs too)
+      if (t && (!diskNow || opts.holdExempt) && opts.elsewhere && !local && (localOnlyAhead || (t.wait !== "queue" && (t.wait !== "settle" || opts.elsewhereWhileSettling)))) {
         const got = await opts.elsewhere(t.why);
         if (got !== null) return { elsewhere: got };
       }
