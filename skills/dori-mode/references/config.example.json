@@ -40,6 +40,9 @@
     "diskFreeMinGb": 50,
     "panesMax": 20
   },
+  "gateway": {
+    "socket": "/run/dori-gateway/dori.sock"
+  },
   "supervision": {
     "defaults": { "wallMinutes": null, "tokens": null, "costUsd": null },
     "lanes": { "long-train": { "wallMinutes": 720, "costUsd": 50 } },

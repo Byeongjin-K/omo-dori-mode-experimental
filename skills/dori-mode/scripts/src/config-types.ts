@@ -114,6 +114,8 @@ export type DoriConfig = {
   readonly heavyHoldDir: string;
   readonly deadPanePatterns: readonly string[];
   readonly guard: GuardThresholds;
+  /** The dori.bot surface: the gateway's local socket (upstream #255). No token; DORI_GATEWAY_SOCKET overrides the path. */
+  readonly gateway: { readonly socket: string };
   readonly hooks: Hooks;
   readonly discord: DiscordWords;
   readonly stuck: Stuck;

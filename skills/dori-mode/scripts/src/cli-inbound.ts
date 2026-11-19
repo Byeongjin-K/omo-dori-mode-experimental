@@ -14,9 +14,12 @@ import type { Command } from "./cli-context.ts";
 import { die, envSlackToken, every } from "./cli-context.ts";
 import { makeDiscordDeps } from "./cli-deps-discord.ts";
 import { makeDirectiveDeps } from "./cli-deps-directives.ts";
+import { inboundGateway } from "./cli-gateway.ts";
 
 const inboundCommand: Command = async (context) => {
   const { loopMinutes, key, config } = context;
+  // the dori.bot surface's subscription over the gateway's local socket (upstream #255, https://github.com/sisyphuslabs/dori-superagent/pull/255)
+  if (key === "gateway") return await inboundGateway(context);
   const { discordClient, threadStatuses, questionCards, gatewaySocket, env, idList, watchMatch, transcribeUrl } = makeDiscordDeps(context);
   const { hintLedger } = makeDirectiveDeps(context);
   const minutes = loopMinutes();
@@ -99,7 +102,7 @@ const inboundCommand: Command = async (context) => {
     );
     return;
   }
-  if (key !== "slack") die("inbound supports slack, discord and telegram");
+  if (key !== "slack") die("inbound supports slack, discord, telegram and gateway");
   const auth = { token: envSlackToken(), cookie: process.env["DORI_SLACK_COOKIE"] };
   const ledger = new ThreadLedger(`${config.stateDir}/slack-threads.json`);
   const slack = new Slack(fetchHttp, realClock, auth, process.env["DORI_SLACK_API"]?.trim() || undefined, ledger);
