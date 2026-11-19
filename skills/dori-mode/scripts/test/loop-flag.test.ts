@@ -13,7 +13,8 @@ test("watch commands refuse a --loop that is not a number of minutes, or is unde
   const state = withState();
   try {
     const config = join(state.dir, "config.json");
-    writeFileSync(config, JSON.stringify({ stateDir: state.dir, defaultCwd: state.dir, hooks: {} }));
+    // no disk floor: a pass on a host short of disk would run du over /tmp, /var/tmp and /home (diskTops) past the timeout
+    writeFileSync(config, JSON.stringify({ stateDir: state.dir, defaultCwd: state.dir, hooks: {}, guard: { diskFreeMinGb: 0 } }));
     const invoke = (...args: string[]) =>
       run(["env", "-u", "DORI_LEAD_PANE", `DORI_CONFIG=${config}`, `DORI_STATE_DIR=${state.dir}`, `DORI_ENV_FILE=${join(state.dir, "missing.env")}`,
         "DORI_TELEGRAM_TOKEN=123:not-a-real-token", "DORI_TELEGRAM_OWNER_ID=1", "DORI_SLACK_TOKEN=xoxb-not-a-real-token", process.execPath, cli, ...args], { timeoutMs: 10_000 });
