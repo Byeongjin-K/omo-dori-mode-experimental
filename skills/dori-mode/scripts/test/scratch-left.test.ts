@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { claimDone, closeLane } from "../src/done-flow.ts";
+import { claimDone, closeLane, watchTick } from "../src/done-flow.ts";
 import { footer } from "../src/launch-footer.ts";
 import type { Lane } from "../src/registry.ts";
 import { depsFor, fakeClock, newWorld, withState, type World } from "./fakes.ts";
@@ -15,7 +15,7 @@ let state: ReturnType<typeof withState>;
 let world: World;
 let home: string;
 const savedHome = process.env["HOME"];
-const at = () => depsFor(world, fakeClock(T0), state.dir, { hooks: { threadDone: ["notify", "{thread}", "{text}"] } });
+const at = (ms = T0) => depsFor(world, fakeClock(ms), state.dir, { hooks: { threadDone: ["notify", "{thread}", "{text}"] } });
 const scratch = () => join(home, ".cache", "dori-scratch", lane.key);
 
 beforeEach(async () => {
@@ -50,6 +50,18 @@ test("close says nothing about scratch when the lane removed its folder", async 
   const r = await closeLane(at(), lane, "manual", "Done.");
   expect(r.closed).toBe(true);
   expect(r.lines.filter((l) => l.startsWith("DORI_SCRATCH_LEFT"))).toEqual([]);
+});
+
+test("the watch's automatic close names a scratch folder the lane left, before LANE_CLOSED, and keeps it", async () => {
+  mkdirSync(scratch(), { recursive: true });
+  writeFileSync(join(scratch(), "a"), "x".repeat(2048));
+  await claimDone(at(), lane, "merged acme/app#1", "Done.");
+  await watchTick(at(T0 + 60_000));
+  const settled = await watchTick(at(T0 + 6 * 60_000));
+  const left = settled.findIndex((l) => l.startsWith("DORI_SCRATCH_LEFT demo-lane 2.0K "));
+  expect(left).toBeGreaterThanOrEqual(0);
+  expect(settled.at(-1)).toStartWith("LANE_CLOSED demo-lane");
+  expect(Bun.file(join(scratch(), "a")).size).toBe(2048);
 });
 
 test("claim-done names a scratch folder still there, while the lane can still remove it", async () => {
