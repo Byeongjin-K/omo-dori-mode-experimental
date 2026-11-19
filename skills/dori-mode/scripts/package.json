@@ -12,7 +12,9 @@
     "check": "biome check .",
     "knip": "knip",
     "lint:loc": "bun check-loc.ts",
-    "ci": "bun run check && bun run typecheck && bun run knip && bun run lint:loc && bun test"
+    "lint:ratchet": "bun src/lint/ratchet.ts",
+    "lint:ratchet:update": "bun src/lint/ratchet.ts --update",
+    "ci": "bun run check && bun run typecheck && bun run knip && bun run lint:loc && bun run lint:ratchet && bun test"
   },
   "engines": {
     "bun": ">=1.4.2"
@@ -21,6 +23,7 @@
     "@biomejs/biome": "^2.6.6",
     "@types/bun": "^1.4.2",
     "knip": "^6.44.2",
+    "oxc-parser": "0.156.0",
     "typescript": "^5.9.0"
   }
 }

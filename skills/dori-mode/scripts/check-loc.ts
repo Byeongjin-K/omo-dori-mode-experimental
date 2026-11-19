@@ -46,7 +46,8 @@ const readBaseline = (root: string): Baseline => {
   return baseline;
 };
 
-const sourceFiles = (root: string): string[] => {
+// lint:ratchet (src/lint/ratchet.ts) reads the same files.
+export const sourceFiles = (root: string): string[] => {
   const files: string[] = [];
   for (const dir of ROOTS) {
     if (!existsSync(join(root, dir))) continue;

@@ -1,0 +1,118 @@
+{
+  "test/ask-relay.test.ts": {
+    "dori-testing/no-flake-masking": 1
+  },
+  "test/backlog.test.ts": {
+    "dori-testing/no-flake-masking": 1
+  },
+  "test/boot-slack-cli.test.ts": {
+    "dori-testing/no-flake-masking": 1
+  },
+  "test/cli-exec.test.ts": {
+    "dori-testing/no-flake-masking": 1
+  },
+  "test/cli-parser.test.ts": {
+    "dori-testing/no-flake-masking": 12
+  },
+  "test/discord-cards.test.ts": {
+    "dori-testing/no-fixed-sleep": 2,
+    "dori-testing/no-flake-masking": 2
+  },
+  "test/done-signals.test.ts": {
+    "dori-testing/no-flake-masking": 1
+  },
+  "test/freshness-heavy.test.ts": {
+    "dori-testing/no-flake-masking": 1
+  },
+  "test/handover-watch.test.ts": {
+    "dori-testing/no-flake-masking": 2
+  },
+  "test/hc-flow.test.ts": {
+    "dori-testing/no-flake-masking": 2
+  },
+  "test/heavy-back.test.ts": {
+    "dori-testing/no-flake-masking": 4
+  },
+  "test/heavy-headroom-cli-fake.ts": {
+    "dori-testing/no-module-mock": 1
+  },
+  "test/heavy-helper-old.test.ts": {
+    "dori-testing/no-flake-masking": 1
+  },
+  "test/heavy-owner-pc.test.ts": {
+    "dori-testing/no-flake-masking": 3
+  },
+  "test/heavy-route.test.ts": {
+    "dori-testing/no-flake-masking": 5
+  },
+  "test/heavy-ship.test.ts": {
+    "dori-testing/no-flake-masking": 7
+  },
+  "test/heavy-spread.test.ts": {
+    "dori-testing/no-flake-masking": 10
+  },
+  "test/heavy-stale-cli.test.ts": {
+    "dori-testing/no-flake-masking": 9
+  },
+  "test/heavy-stale.test.ts": {
+    "dori-testing/no-flake-masking": 10
+  },
+  "test/heavy-tools.test.ts": {
+    "dori-testing/no-fixed-sleep": 1,
+    "dori-testing/no-flake-masking": 7
+  },
+  "test/kakao-system.test.ts": {
+    "dori-testing/no-flake-masking": 2
+  },
+  "test/launch-footer-instance.test.ts": {
+    "dori-testing/no-flake-masking": 1
+  },
+  "test/lesson-cli.test.ts": {
+    "dori-testing/no-flake-masking": 1
+  },
+  "test/loop-flag.test.ts": {
+    "dori-testing/no-flake-masking": 1
+  },
+  "test/session-watch-cli-fake.ts": {
+    "dori-testing/no-module-mock": 1
+  },
+  "test/skill-check.test.ts": {
+    "dori-testing/no-flake-masking": 18
+  },
+  "test/slack-watch-token.test.ts": {
+    "dori-testing/no-flake-masking": 1
+  },
+  "test/slack-watch.test.ts": {
+    "dori-testing/no-flake-masking": 2
+  },
+  "test/telegram-send-cli.test.ts": {
+    "dori-testing/no-flake-masking": 4
+  },
+  "test/windows-freeze.test.ts": {
+    "dori-testing/no-flake-masking": 1
+  },
+  "test/windows-install.test.ts": {
+    "dori-testing/no-flake-masking": 10
+  },
+  "test/windows-powershell.test.ts": {
+    "dori-testing/no-flake-masking": 1
+  },
+  "test/windows-process.test.ts": {
+    "dori-testing/no-flake-masking": 1
+  },
+  "test/windows-review.test.ts": {
+    "dori-testing/no-flake-masking": 2
+  },
+  "test/windows-serve.test.ts": {
+    "dori-testing/no-flake-masking": 3
+  },
+  "test/windows-shell.test.ts": {
+    "dori-testing/no-flake-masking": 3
+  },
+  "test/windows-skills.test.ts": {
+    "dori-testing/no-flake-masking": 3
+  },
+  "test/worklog-records.test.ts": {
+    "dori-testing/no-flake-masking": 1
+  }
+}
