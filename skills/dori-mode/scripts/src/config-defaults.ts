@@ -61,6 +61,7 @@ export const defaultConfig = (home = homedir()): DoriConfig => ({
   heavyQueue: { jobs: {}, helpers: [], queue: [], rl: true, jobDir: "/dev/shm/dori-heavy", exec: false, execMaxMin: 240, staleMin: 20, aliveSec: 60 },
   deadPanePatterns: ["has stopped", "no suitable jobs"],
   guard: { loadAlert: 150, loadOk: 80, memFreeMinPct: 20, diskFreeMinGb: 50, panesMax: 20 },
+  gateway: { socket: "/run/dori-gateway/dori.sock" },
   hooks: {},
   discord: defaultDiscordWords,
   stuck: {

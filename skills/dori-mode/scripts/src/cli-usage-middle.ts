@@ -159,6 +159,10 @@ export const USAGE_MIDDLE = `  challenge <key> --plan FILE [--model M] [--all]
   send <slack|telegram|discord> --to TARGET --text TEXT | --text-file FILE [--thread ID] [--edit ID] [--status working|done] [--no-typing] [--ping USER_ID] [--reply ID] [--again]
   send slack --to CHANNEL --file PATH [--file PATH ...] [--text TEXT | --text-file FILE] [--thread TS]
   send discord --to CHANNEL --file PATH [--file PATH ...] [--text TEXT | --text-file FILE] [--thread ID] [--reply ID]
+  send gateway --text TEXT | --text-file FILE [--edit ID] | --status start|update|stop --text TEXT [--status-id ID] [--row running|done|failed:LABEL ...]
+       | --question TEXT --option LABEL --option LABEL ... | --receipt TITLE --line LABEL=VALUE ...
+                                       the dori.bot surface over the local socket (DORI_GATEWAY_SOCKET, else gateway.socket,
+                                       default /run/dori-gateway/dori.sock; no token); prints SENT, STATUS or QUESTION <id>
                                        post or edit a message (tokens from DORI_SLACK_TOKEN or DORI_SLACK_TOKEN_FILE, DORI_TELEGRAM_TOKEN, DORI_DISCORD_TOKEN);
                                        telegram --thread and --edit take a positive whole-number id; an empty, bare or malformed id is
                                        refused before any request, never converted into a General post or a null-id edit;
