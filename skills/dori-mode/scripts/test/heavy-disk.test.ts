@@ -47,6 +47,18 @@ test("under guard.diskFreeCritGb dori heavy takes no new job and says why, while
   expect(await running.exited).toBe(0);
 });
 
+test("a dori heavy that a running job starts under guard.diskFreeCritGb is part of that job and runs", async () => {
+  const { env, freeGb } = setup();
+  freeGb(100);
+  // the outer job lowers the disk, then starts its own dori heavy: refused as a new job would be, it would cut the job
+  const inner = `echo $((5 * 1048576)) > ${join(state.dir, "avail")}; ${process.execPath} ${CLI} heavy inner -- sh -c 'echo inner ran'`;
+  const outer = Bun.spawn([process.execPath, CLI, "heavy", "outer", "--", "sh", "-c", inner], { env, stdout: "pipe", stderr: "pipe" });
+  const [code, out, err] = [await outer.exited, await new Response(outer.stdout).text(), await new Response(outer.stderr).text()];
+  expect([code, out]).toEqual([0, "inner ran\n"]);
+  expect(err).toContain("HEAVY_NESTED inner");
+  expect(err).not.toContain("HEAVY_REFUSED");
+});
+
 test("a helper under guard.diskFreeCritGb refuses another host's job before it reads anything", async () => {
   const { env, freeGb } = setup();
   freeGb(5);

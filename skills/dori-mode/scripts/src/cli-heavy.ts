@@ -31,8 +31,8 @@ const heavyCommand: Command = async (context) => {
     return;
   }
   // under guard.diskFreeCritGb no new job starts from this host, here or on a helper (its archive, output and log are
-  // written here); jobs already running are not touched
-  const diskFull = await diskCritWhy(run, config.guard);
+  // written here); jobs already running are not touched, nor what one of them starts (HEAVY_NESTED: its slot and scope)
+  const diskFull = heavyOuter() ? undefined : await diskCritWhy(run, config.guard);
   if (diskFull) {
     heavyDeps(load).log?.(`HEAVY_REFUSED ${label && !label.startsWith("-") ? label : "-"}: ${diskFull}`);
     process.exitCode = 2;
