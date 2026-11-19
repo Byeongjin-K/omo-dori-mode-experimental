@@ -23,7 +23,7 @@ The client holds no token and knows nothing about where the chat lives: it write
 | `send` | `kind: "status"`, `op_id`, `status_id`, `phase`, `text`, `rows` | One status row edited in place. `phase: "start"` creates row `status_id` (the client uses the start's `op_id`), `update` and `stop` change it. `rows` is a list of `{ id, label, state }` with `state` one of `running`, `done`, `failed` (at most 50). |
 | `send` | `kind: "question"`, `op_id`, `text`, `options` | A question with options `{ id, label }` (at most 8). The question's id is its `op_id`; the answer comes back inbound. |
 | `send` | `kind: "receipt"`, `op_id`, `title`, `lines` | A receipt: a title and `{ label, value }` lines (at most 20). |
-| `subscribe` | `session_id` | Opens the inbound stream and announces the lead session it belongs to. |
+| `subscribe` | `session_id`, `session_path` | Opens the inbound stream and announces the lead session it belongs to: its id and the absolute path of its session file (upstream #256). |
 | `ack` | `seq` | The Dori has taken inbound `seq`. |
 
 Ids (`op_id`, `target_id`, `status_id`, option and row ids) match `[A-Za-z0-9_-]{1,64}`. A text is 1 to 32,768 characters; a label, title or value 1 to 200.
@@ -65,7 +65,7 @@ An answer names its question and carries `option_id`, `text`, or both.
 - `--question T --option LABEL --option LABEL ...` prints `QUESTION <id>`; options are numbered `o1`, `o2`, ... (In the fork `--question` takes the question text: upstream writes `--question --text T`, but the fork's option table has `--question` as a value flag.)
 - `--receipt TITLE --line LABEL=VALUE ...` prints `SENT <id> content=not-returned`.
 - In the fork a new message (post, question, receipt) goes out once per conversation and content, as every `dori send` does: the same one again within 10 minutes, or equal to the conversation's last post, prints `SEND_DUPLICATE` and exits 3, and `--again` sends it once more. Edits and status rows are never checked (review 2 of #511; upstream's `op_id` stops only a retry inside one call). New messages to one socket go out one at a time, under a lock of that conversation that dies with its holder, so a send that retries past the repeat check's 60 s claim is never doubled and the last post on record is the one the gateway got last; every text the user sees (receipt title and lines, option labels, row labels) is checked for a literal `\n` (review 3 of #511).
-- `dori inbound gateway [--session ID]` subscribes as the lead session (default `PI_SESSION_ID`), prints `INBOUND_READY gateway`, then one line per message, in the other messengers' field order:
+- `dori inbound gateway [--session ID] [--session-file PATH]` subscribes as the lead session (default `PI_SESSION_ID` and `PI_SESSION_FILE`; a relative `--session-file` is refused), prints `INBOUND_READY gateway`, then one line per message, in the other messengers' field order:
 
 ```
 INBOUND gateway <session> - <id> - <json text>

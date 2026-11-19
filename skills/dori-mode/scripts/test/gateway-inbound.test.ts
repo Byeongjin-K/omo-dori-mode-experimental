@@ -7,6 +7,9 @@ import type { InboundFrame } from "../src/messenger/gateway-frames.ts";
 import { memoryGateway, recordingClock } from "./gateway-fakes.ts";
 
 const SESSION = "0b8f3c1e-session";
+// upstream #256 (sisyphuslabs/dori-superagent#256): the subscription also names the session file
+const SESSION_FILE = "/sessions/lead.jsonl";
+const ANNOUNCED = { id: SESSION, path: SESSION_FILE };
 const message = (seq: number, text: string) => ({
   op: "inbound",
   seq,
@@ -37,10 +40,10 @@ test("inbound announces the lead session, hands each message to the lead, and ac
     handed.push([session, inbound]);
   };
   // When the Dori subscribes as its lead session, until the gateway is gone.
-  const done = new Gateway(gw.connector, recordingClock(), "/run/dori-gateway/dori.sock").subscribe(SESSION, lead);
+  const done = new Gateway(gw.connector, recordingClock(), "/run/dori-gateway/dori.sock").subscribe(ANNOUNCED, lead);
   await expect(done).rejects.toThrow("gateway_unavailable");
   // Then the subscription named the session, both inbound frames reached the lead with that id, each acked after it.
-  expect(gw.received[0]).toEqual({ op: "subscribe", session_id: SESSION });
+  expect(gw.received[0]).toEqual({ op: "subscribe", session_id: SESSION, session_path: SESSION_FILE });
   expect(handed.map(([session, i]) => [session, i.kind, i.seq])).toEqual([
     [SESSION, "message", 1],
     [SESSION, "answer", 2],
@@ -68,7 +71,7 @@ test("after a dropped connection the session is announced again and a resent seq
   );
   const handed: number[] = [];
   const clock = recordingClock();
-  const done = new Gateway(gw.connector, clock, "/sock").subscribe(SESSION, (_, i) => void handed.push(i.seq));
+  const done = new Gateway(gw.connector, clock, "/sock").subscribe(ANNOUNCED, (_, i) => void handed.push(i.seq));
   await expect(done).rejects.toThrow("gateway_unavailable");
   // Then seq 1 reached the lead once, was acked on both connections, and the reconnects waited on the injected clock.
   expect(handed).toEqual([1, 2]);
@@ -102,7 +105,7 @@ test("a message or an answer longer than 200 characters reaches the lead whole",
   const long = `${"a".repeat(250)} end`;
   const gw = once([message(1, long), { ...message(2, ""), kind: "answer", question_id: "op-6", option_id: "o1", text: long }]);
   const lines: string[] = [];
-  const done = new Gateway(gw.connector, recordingClock(), "/sock").subscribe(SESSION, gatewayLead((line) => void lines.push(line)));
+  const done = new Gateway(gw.connector, recordingClock(), "/sock").subscribe(ANNOUNCED, gatewayLead((line) => void lines.push(line)));
   await expect(done).rejects.toThrow("gateway_unavailable");
   expect(lines).toEqual([
     `INBOUND gateway ${SESSION} - m1 - ${JSON.stringify(long)}\n`,
@@ -115,7 +118,7 @@ test("an inbound line stdout did not take is not acked, and the stream stops so 
   const closedStdout = () => {
     throw new Error("EPIPE: broken pipe, write");
   };
-  const done = new Gateway(gw.connector, recordingClock(), "/sock").subscribe(SESSION, gatewayLead(closedStdout));
+  const done = new Gateway(gw.connector, recordingClock(), "/sock").subscribe(ANNOUNCED, gatewayLead(closedStdout));
   await expect(done).rejects.toThrow("EPIPE");
   expect(gw.received.filter((f) => f["op"] === "ack")).toEqual([]);
 });
@@ -133,7 +136,7 @@ test("a subscription answered unavailable is retried with backoff, not ended", a
   );
   const handed: number[] = [];
   const clock = recordingClock();
-  const done = new Gateway(gw.connector, clock, "/sock").subscribe(SESSION, (_, i) => void handed.push(i.seq));
+  const done = new Gateway(gw.connector, clock, "/sock").subscribe(ANNOUNCED, (_, i) => void handed.push(i.seq));
   await expect(done).rejects.toThrow("gateway_unavailable");
   expect(handed).toEqual([1]);
   expect(gw.received.filter((f) => f["op"] === "subscribe")).toHaveLength(2);
@@ -142,7 +145,7 @@ test("a subscription answered unavailable is retried with backoff, not ended", a
 
 test("a permanent subscription refusal still ends the stream at once", async () => {
   const gw = memoryGateway((frame, peer) => (frame["op"] === "subscribe" ? peer.reply({ op: "result", re: "subscribe", code: "invalid" }) : undefined));
-  const done = new Gateway(gw.connector, recordingClock(), "/sock").subscribe(SESSION, () => {});
+  const done = new Gateway(gw.connector, recordingClock(), "/sock").subscribe(ANNOUNCED, () => {});
   await expect(done).rejects.toThrow("gateway refused the subscription: invalid");
   expect(gw.attempts()).toBe(1);
 });
