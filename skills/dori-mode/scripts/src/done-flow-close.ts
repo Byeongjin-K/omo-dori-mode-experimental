@@ -14,6 +14,7 @@ import { ownerSummary } from "./close-summary.ts";
 import { CostRecordBusy, laneSessionUsage, Supervision } from "./supervision.ts";
 import { Lessons, type LessonInput } from "./lessons.ts";
 import { isRepeat } from "./send-dedupe.ts";
+import { scratchLeft } from "./scratch.ts";
 
 // note goes into the lane's record. A lane with a work thread closes only with a summary for the owner (summary, else the
 // claim's, else one a model writes from the lane's notes; close-summary.ts), posted there before the thread is marked done
@@ -135,6 +136,8 @@ export const closeLane = async (deps: FlowDeps, lane: Lane, note: string, summar
     const r = await deps.run(["git", "-C", root, "worktree", "remove", wt]);
     cleanup.push(r.code === 0 ? `worktree ${wt} removed` : `worktree ${wt} kept: ${r.err.slice(0, 120)}`);
   }
+  const scratch = scratchLeft(lane.key);
+  if (scratch) warnings.push(scratch);
   const at = iso(deps.clock);
   const receipt = { checks, note, cleanup };
   await deps.registry.write(withStatus(lane, "closed", note, at, { closedAt: at, receipt }));

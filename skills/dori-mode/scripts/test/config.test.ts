@@ -139,7 +139,7 @@ test("every key the config loader knows is documented, and every DORI_ variable 
   const read = new Set<string>();
   for (const file of sources) for (const m of (await Bun.file(join(root, file)).text()).matchAll(/\bDORI_[A-Z0-9_]*[A-Z0-9]\b/g)) read.add(m[0]);
   // log-line tags, not variables
-  for (const tag of ["DORI_SHELL_CHECK_PASS"]) read.delete(tag);
+  for (const tag of ["DORI_SHELL_CHECK_PASS", "DORI_SCRATCH_LEFT"]) read.delete(tag);
   // When
   // instances is [] by default, so its entry fields come from a sample; the discord words are documented by their bare names in the discord row
   const keys = [...knownConfigKeys(), ...configKeys({ instances: [{ config: "", envFile: "" }] })];
