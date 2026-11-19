@@ -1,4 +1,4 @@
-import { appendInboxRow } from "../inbox-append.ts";
+import { appendInboxRow, inboxRows } from "../inbox-append.ts";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
@@ -212,9 +212,8 @@ export class DiscordListener {
     this.eyesFile = join(dirname(d.inboxFile), "eyes.json");
     this.backfillFile = d.shadow ? `${d.inboxFile}.backfill.json` : join(dirname(d.inboxFile), "backfill.json");
     if (existsSync(this.eyesFile)) this.eyes = JSON.parse(readFileSync(this.eyesFile, "utf8")) as Record<string, string[]>;
-    for (const line of existsSync(d.inboxFile) ? readFileSync(d.inboxFile, "utf8").split("\n") : []) {
-      if (!line.trim()) continue;
-      const row = JSON.parse(line) as { id: string; kind?: string; scope?: string; channel_id?: string; called?: boolean; author_id?: string; reply_to?: string | null; content?: string };
+    for (const raw of inboxRows(d.inboxFile, d.log)) {
+      const row = raw as { id: string; kind?: string; scope?: string; channel_id?: string; called?: boolean; author_id?: string; reply_to?: string | null; content?: string };
       this.seen.add(row.id);
       if (row.scope === "pair" && row.called === false) this.uncalled.add(row.id);
       if (row.scope === "pair-bot" && row.channel_id)
