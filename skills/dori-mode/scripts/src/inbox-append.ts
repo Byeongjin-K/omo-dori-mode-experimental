@@ -12,12 +12,12 @@ import { CheckpointError, takeLock } from "./checkpoint-lock.ts";
 //   lands between its bytes, and a write that fails part way (ENOSPC on a full disk, review 5 of #509) is cut back to the
 //   size the file had before it; the error stands for the caller. A writer killed mid-row can still leave half a row:
 //   readers go through inboxRows.
-const LOCK_WAIT_MS = 5_000;
-// waitMs: how long it waits for another append to let go of the lock before it fails (CheckpointError)
-export const appendInboxRow = (inbox: string, row: unknown, waitMs = LOCK_WAIT_MS): void => {
+// - No row is turned away: the append waits for the lock as long as another writer holds it, since every caller has
+//   marked its message seen by then and a row it gave up on would be lost (review 8 of #509).
+export const appendInboxRow = (inbox: string, row: unknown): void => {
   mkdirSync(dirname(inbox), { recursive: true, mode: 0o700 });
   const bytes = Buffer.from(`${JSON.stringify(row)}\n`);
-  const release = lockInbox(inbox, waitMs);
+  const release = lockInbox(inbox);
   try {
     const fd = openSync(inbox, "a", 0o600);
     try {
@@ -37,14 +37,23 @@ export const appendInboxRow = (inbox: string, row: unknown, waitMs = LOCK_WAIT_M
   }
 };
 
-// the append's own lock, waited for a short while (another append holds it for one write)
-const lockInbox = (inbox: string, waitMs: number): (() => void) => {
-  const until = Date.now() + waitMs;
+// the append's own lock, waited for with no deadline (another append holds it for one write; the kernel frees the lock of
+// a holder that dies). A holder that is stuck, not dead, stops every writer, so a wait past 5 s says so once on stderr
+// (written at once: this loop holds the thread) and goes on waiting.
+const WAIT_NOTE_MS = 5_000;
+const lockInbox = (inbox: string): (() => void) => {
+  const start = Date.now();
+  let told = false;
   for (;;) {
     try {
       return takeLock(`${inbox}.lock`, Date.now(), "inbox append", inbox);
     } catch (e) {
-      if (!(e instanceof CheckpointError) || Date.now() > until) throw e;
+      if (!(e instanceof CheckpointError)) throw e;
+      const waited = Date.now() - start;
+      if (!told && waited > WAIT_NOTE_MS) {
+        told = true;
+        writeSync(2, `INBOX_LOCK_WAIT ${inbox} ${Math.round(waited / 1000)}\n`);
+      }
       Bun.sleepSync(5);
     }
   }

@@ -360,15 +360,16 @@ run(main)
 # other inbox writer does (src/inbox-append.ts appendInboxRow and its takeLock): no other writer's bytes land between this
 # line's, and an append cut back after a failed write never takes this line with it (review 7 of #509). Same protocol:
 # flock, then the path must still name the file locked (a release removes it while holding it), and the release removes
-# it again. Waited for up to 5 s, then the delivery fails and is retried.
+# it again. Waited for with no deadline, as appendInboxRow does (review 8 of #509); past 5 s one INBOX_LOCK_WAIT line on
+# stderr says a holder is stuck, and the wait goes on (flock resumes after the alarm). The relay waits for it too.
 INBOX = COMMON + r'''
 import fcntl, signal
 
-def late(*_):
-    raise TimeoutError("inbox append locked")
-
 def lock_inbox(lock):
-    signal.signal(signal.SIGALRM, late)
+    def note(*_):
+        sys.stderr.write("INBOX_LOCK_WAIT %s 5\n" % lock[:-len(".lock")])
+        sys.stderr.flush()
+    signal.signal(signal.SIGALRM, note)
     signal.alarm(5)
     try:
         while True:
@@ -452,7 +453,7 @@ def helper(account: str, role: str, code: str, args: list) -> tuple:
                             stderr=subprocess.PIPE, start_new_session=True), data
 
 
-def call(account: str, role: str, code: str, args: list, data: bytes = b"", timeout: int = 120) -> tuple:
+def call(account: str, role: str, code: str, args: list, data: bytes = b"", timeout: int | None = 120) -> tuple:
     """Run a small helper to the end: (stdout, last stderr line); a refusal raises Refused, a failure RuntimeError."""
     p, boot = helper(account, role, code, args)
     try:
@@ -462,6 +463,8 @@ def call(account: str, role: str, code: str, args: list, data: bytes = b"", time
         p.communicate()
         raise RuntimeError(f"{role} timed out") from None
     line = last_line(err)
+    for wait in (l for l in err.decode(errors="replace").splitlines() if l.startswith("INBOX_LOCK_WAIT ")):
+        sys.stderr.write(wait + "\n")
     if p.returncode == 3 and line.startswith("REFUSED "):
         raise Refused(line.split(" ", 1)[1])
     if p.returncode != 0:
@@ -641,7 +644,7 @@ class Server:
         }
         if not inbox:
             raise RuntimeError("no inbox set")
-        call(acct, "inbox", INBOX, [inbox], (json.dumps(line, ensure_ascii=False) + "\n").encode())
+        call(acct, "inbox", INBOX, [inbox], (json.dumps(line, ensure_ascii=False) + "\n").encode(), timeout=None)
 
     def deliver(self, name: str, row: dict, key: tuple, sig: tuple) -> None:
         src_acct, dst_acct = self.doris[name][0], self.doris[row["to"]][0]

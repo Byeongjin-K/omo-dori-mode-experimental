@@ -429,15 +429,16 @@ def append_inbox(record: dict) -> None:
 # The append holds <inbox>.lock as every other inbox writer does (src/inbox-append.ts appendInboxRow and its takeLock):
 # no other writer's bytes land between this row's, and an append cut back after a failed write never takes this row with
 # it (review 7 of #509). Same protocol: flock, then the path must still name the file locked (a release removes it while
-# holding it), and the release removes it again. Waited for up to 5 s, then TimeoutError (the item is retried next run).
-def lock_inbox(wait: int = 5) -> tuple[str, int]:
+# holding it), and the release removes it again. Waited for with no deadline, as appendInboxRow does (review 8 of #509);
+# past 5 s one INBOX_LOCK_WAIT line on stderr says a holder is stuck, and the wait goes on (flock resumes after the alarm).
+def lock_inbox(note_after: int = 5) -> tuple[str, int]:
     lock = f"{INBOX}.lock"
 
-    def late(*_):
-        raise TimeoutError(f"inbox append locked: {INBOX}")
+    def note(*_):
+        print(f"INBOX_LOCK_WAIT {INBOX} {note_after}", file=sys.stderr, flush=True)
 
-    old = signal.signal(signal.SIGALRM, late)
-    signal.alarm(wait)
+    old = signal.signal(signal.SIGALRM, note)
+    signal.alarm(note_after)
     try:
         while True:
             fd = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)

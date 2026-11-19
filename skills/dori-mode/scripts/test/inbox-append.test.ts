@@ -1,10 +1,12 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, setDefaultTimeout, test } from "bun:test";
 import { appendFileSync, mkdirSync, readFileSync, statSync, truncateSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { takeLock } from "../src/checkpoint-lock.ts";
 import { appendInboxRow, inboxRows } from "../src/inbox-append.ts";
 import { withState } from "./fakes.ts";
+
+setDefaultTimeout(20_000); // the wait tests below hold the lock past the 5 s after which a writer says it is waiting
 
 let state: ReturnType<typeof withState>;
 beforeEach(() => (state = withState()));
@@ -57,45 +59,6 @@ test("a whole row on the end of a torn one is kept, a torn last line is left out
   expect(notes).toEqual([`INBOX_SKIPPED ${inbox}: 2 line(s) were not whole rows (a write cut off part way) and were left out; every whole row is kept`]);
 });
 
-// two writers at once: an append waits for the one that holds <inbox>.lock, so none lands between another's bytes or its
-// cut back (a separate open of the lock conflicts in one process too, so this process is the other writer)
-test("an append waits for another append's lock, writes nothing while it is held, and goes in once it is let go", () => {
-  const inbox = join(state.dir, "inbox.jsonl");
-  appendInboxRow(inbox, B);
-  const release = takeLock(`${inbox}.lock`, Date.now(), "inbox append", inbox);
-  expect(() => appendInboxRow(inbox, C, 20)).toThrow("inbox append locked");
-  expect(rows(inbox)).toEqual([B]);
-  release();
-  appendInboxRow(inbox, C, 20);
-  expect(rows(inbox)).toEqual([B, C]);
-});
-
-// the same across processes, as the guard, the listener and backlog are: a child's append while this process holds the
-// lock fails and writes nothing, and goes in once the lock is let go
-test("another process's append waits for the lock this one holds and writes nothing meanwhile", async () => {
-  const inbox = join(state.dir, "inbox.jsonl");
-  appendInboxRow(inbox, B);
-  const probe = join(state.dir, "append.ts");
-  writeFileSync(probe, `import { appendInboxRow } from ${JSON.stringify(join(import.meta.dir, "../src/inbox-append.ts"))};
-try {
-  appendInboxRow(${JSON.stringify(inbox)}, ${JSON.stringify(C)}, 50);
-  console.log("written");
-} catch (e) {
-  console.log((e as Error).message.split(":")[0]);
-}`);
-  const child = async () => {
-    const p = Bun.spawn([process.execPath, probe], { stdout: "pipe", stderr: "pipe" });
-    const [out] = [await new Response(p.stdout).text(), await p.exited];
-    return out.trim();
-  };
-  const release = takeLock(`${inbox}.lock`, Date.now(), "inbox append", inbox);
-  expect(await child()).toBe("inbox append locked");
-  expect(rows(inbox)).toEqual([B]);
-  release();
-  expect(await child()).toBe("written");
-  expect(rows(inbox)).toEqual([B, C]);
-});
-
 // review 7 of #509: the setup writers outside src appended without <inbox>.lock, so an append taken back to its size
 // (above) cut off a row one of them had written whole after its bytes. Each Python writer is run while this process holds
 // the lock with half an append written; once it comes to the lock (its flock prints AT_LOCK first) or has written without
@@ -109,18 +72,16 @@ const setupWriters: Record<string, (inbox: string, row: unknown) => { cmd: strin
     env: {},
   }),
 };
-// the child's output up to AT_LOCK, or all of it once it has left; the pipe stays open for the child
-const untilLock = async (out: ReadableStream<Uint8Array>): Promise<string> => {
-  const reader = out.getReader();
+// the child's output up to mark, or all of it once it has left (mark "" reads to the end); the pipe stays open for the child
+const until = async (reader: { read(): Promise<{ done: boolean; value?: Uint8Array | undefined }> }, mark: string): Promise<string> => {
   const dec = new TextDecoder();
   let seen = "";
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
     seen += dec.decode(value, { stream: true });
-    if (seen.includes("AT_LOCK")) break;
+    if (mark && seen.includes(mark)) break;
   }
-  reader.releaseLock();
   return seen;
 };
 
@@ -134,10 +95,37 @@ test.each(Object.keys(setupWriters))("%s appends under <inbox>.lock: it waits wh
   const w = setupWriters[name]!(inbox, C);
   const p = Bun.spawn(w.cmd, { env: { PATH: "/usr/bin:/bin", ...w.env }, stdout: "pipe", stderr: "pipe" });
   // the writer comes to the lock, or (without it) has already written and left
-  expect(await untilLock(p.stdout)).toContain("AT_LOCK");
+  expect(await until(p.stdout.getReader(), "AT_LOCK")).toContain("AT_LOCK");
   truncateSync(inbox, before); // the append is taken back, as appendInboxRow does when its write fails part way
   release();
   const [code, err] = [await p.exited, await new Response(p.stderr).text()];
   expect({ code, err: code === 0 ? "" : err }).toEqual({ code: 0, err: "" });
+  expect(rows(inbox)).toEqual([B, C]);
+});
+
+// review 8 of #509: a wait with a deadline turned a row away while another writer held the lock, and every caller had
+// marked its message seen by then, so the row was lost. An append now waits for as long as the lock is held; past 5 s it
+// says so once on stderr (a holder that is stuck, not dead, stops every writer) and goes on waiting. The listener's writer
+// and both Python setup writers, each held past 5 s by this process.
+const probeWriter = (inbox: string, row: unknown) => {
+  const probe = join(dirname(inbox), "append.ts");
+  writeFileSync(probe, `import { appendInboxRow } from ${JSON.stringify(join(import.meta.dir, "../src/inbox-append.ts"))};\nappendInboxRow(${JSON.stringify(inbox)}, ${JSON.stringify(row)});\n`);
+  return { cmd: [process.execPath, probe], env: {} };
+};
+const heldWriters = { "inbox-append.ts": probeWriter, ...setupWriters };
+
+test.each(Object.keys(heldWriters))("%s waits past 5 s for a held lock with one INBOX_LOCK_WAIT line, writes nothing meanwhile, and its row goes in once when the lock is let go", async (name) => {
+  const inbox = join(state.dir, "za", ".za", "inbox.jsonl");
+  mkdirSync(join(state.dir, "za", ".za"), { recursive: true });
+  appendInboxRow(inbox, B);
+  const release = takeLock(`${inbox}.lock`, Date.now(), "inbox append", inbox);
+  const w = heldWriters[name as keyof typeof heldWriters](inbox, C);
+  const p = Bun.spawn(w.cmd, { env: { PATH: "/usr/bin:/bin", ...w.env }, stdout: "pipe", stderr: "pipe" });
+  const err = p.stderr.getReader();
+  const said = await until(err, "INBOX_LOCK_WAIT");
+  expect(rows(inbox)).toEqual([B]);
+  release();
+  const [code, rest] = [await p.exited, await until(err, "")];
+  expect({ code, waits: (said + rest).split("\n").filter((l) => l.startsWith("INBOX_LOCK_WAIT")) }).toEqual({ code: 0, waits: [`INBOX_LOCK_WAIT ${inbox} 5`] });
   expect(rows(inbox)).toEqual([B, C]);
 });
