@@ -60,7 +60,7 @@ export const defaultConfig = (home = homedir()): DoriConfig => ({
   heavyHoldDir: "/tmp/dori-heavy-hold",
   heavyQueue: { jobs: {}, helpers: [], queue: [], rl: true, jobDir: "/dev/shm/dori-heavy", exec: false, execMaxMin: 240, staleMin: 20, aliveSec: 60 },
   deadPanePatterns: ["has stopped", "no suitable jobs"],
-  guard: { loadAlert: 150, loadOk: 80, memFreeMinPct: 20, diskFreeMinGb: 50, diskFreeCritGb: 10, panesMax: 20 },
+  guard: { loadAlert: 150, loadOk: 80, memFreeMinPct: 20, diskFreeMinGb: 50, panesMax: 20 },
   hooks: {},
   discord: defaultDiscordWords,
   stuck: {

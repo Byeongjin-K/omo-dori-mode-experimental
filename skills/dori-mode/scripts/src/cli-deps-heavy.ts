@@ -2,7 +2,6 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { userInfo } from "node:os";
 import { sampleUsage } from "./heavy-headroom.ts";
 import { holdNote } from "./heavy-hold.ts";
-import { diskCritWhy } from "./host-guard.ts";
 import { pidAlive, type SlotDeps } from "./heavy-slot.ts";
 import { realClock, run } from "./run.ts";
 import type { Cli } from "./cli-context.ts";
@@ -20,7 +19,6 @@ export const makeHeavyDeps = (cli: Pick<Cli, "config">) => {
     alive: pidAlive,
     pid: process.pid,
     hold: () => holdNote(config.heavyHoldDir, realClock.now(), userInfo().username),
-    disk: () => diskCritWhy(run, config.guard),
     headroom: { maxSlots: config.heavyMaxSlots, free: config.heavyHeadroomPct, settleSec: config.heavySettleSec, usage: (pids) => sampleUsage(run, pids), gpuFreeKb: config.heavyGpuFreeGb * 1024 ** 2 },
     log: (line) => {
       console.error(line);

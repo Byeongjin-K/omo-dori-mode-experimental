@@ -5,11 +5,11 @@ import { defaultOut, heavyBatch, readItems } from "./heavy-batch.ts";
 import { heavyOuter, runHere } from "./heavy-here.ts";
 import { holdCommand } from "./heavy-hold.ts";
 import { gpuRoom, neverFits, parseMem, readMeminfo } from "./heavy-mem.ts";
-import { heavyJobCommand, heavyServe, holdExemptJob } from "./heavy-queue.ts";
+import { heavyJobCommand, heavyServe } from "./heavy-queue.ts";
 import { heavyWorker } from "./heavy-worker.ts";
 import { logShip, shipMissing } from "./heavy-ship.ts";
 import { heavySpread, isKind, spreadPlan, toolsHere, withPipefail, type Plan, type SpreadJob } from "./heavy-spread.ts";
-import { diskCritWhy, sampleHost } from "./host-guard.ts";
+import { sampleHost } from "./host-guard.ts";
 import { run } from "./run.ts";
 import type { Command } from "./cli-context.ts";
 import { die } from "./cli-context.ts";
@@ -28,15 +28,6 @@ const heavyCommand: Command = async (context) => {
     const r = holdCommand(config.heavyHoldDir, userInfo().username, rest[1], opt("until"), many("reason").join(" "), Date.now(), many("except"));
     for (const l of r.lines) heavyDeps(load).log?.(l);
     process.exitCode = r.code;
-    return;
-  }
-  // under guard.diskFreeCritGb no new job starts from this host, here or on a helper (its archive, output and log are
-  // written here); jobs already running are not touched, nor what one of them starts (HEAVY_NESTED: its slot and scope),
-  // nor the owner's transcription
-  const diskFull = heavyOuter() || holdExemptJob(opt("job") ?? "") ? undefined : await diskCritWhy(run, config.guard);
-  if (diskFull) {
-    heavyDeps(load).log?.(`HEAVY_REFUSED ${label && !label.startsWith("-") ? label : "-"}: ${diskFull}`);
-    process.exitCode = 2;
     return;
   }
   const jobName = opt("job");

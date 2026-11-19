@@ -17,7 +17,7 @@ beforeEach(() => {
 afterEach(() => state.done());
 
 test("the host guard alerts on low disk, clears when it recovers, and flips compute readiness on load", () => {
-  const t = { loadAlert: 150, loadOk: 80, memFreeMinPct: 20, diskFreeMinGb: 50, diskFreeCritGb: 10, panesMax: 20 };
+  const t = { loadAlert: 150, loadOk: 80, memFreeMinPct: 20, diskFreeMinGb: 50, panesMax: 20 };
   const st = { alerting: false } as { alerting: boolean; computeReady?: boolean };
   const healthy = { load1: 40, memFreePct: 50, diskFreeGb: 200, swapFreeGb: 4, panes: 5 };
   expect(guardTick(healthy, t, st)).toEqual(["HOST_GUARD COMPUTE_READY load 40 < 80"]);

@@ -26,7 +26,4 @@ export type SlotDeps = {
   readonly log?: (line: string) => void;
   // the live holds on this host's slots (dori heavy hold-local, heavy-hold.ts holdNote), or undefined: none, a job may take one
   readonly hold?: () => string | undefined;
-  // why this host's disk takes no new job now (host-guard.ts diskCritWhy, guard.diskFreeCritGb), or undefined: room; a job
-  // waiting in line waits for it as for a hold, and an admission for another host is busy
-  readonly disk?: () => Promise<string | undefined>;
 };

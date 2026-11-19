@@ -47,17 +47,10 @@ export const sampleHost = async (run: Runner, config: Pick<DoriConfig, "backend"
 };
 
 // free GB of the filesystem holding path from df -k (null: df did not answer with a number)
-export const sampleDiskFreeGb = async (run: Runner, path = "/"): Promise<number | null> => {
+const sampleDiskFreeGb = async (run: Runner, path = "/"): Promise<number | null> => {
   const df = await run(["df", "-k", path]);
   const kb = Number(df.out.split("\n").filter(Boolean).at(-1)?.trim().split(/\s+/)[3]);
   return df.code === 0 && Number.isFinite(kb) ? kb / 1_048_576 : null;
-};
-
-// guard.diskFreeCritGb: under it dori heavy takes no new job on this host, here or for another host (heavy-worker); jobs
-// already running go on. Unread df holds nothing here: the guard's own disk line says it (0 GB).
-export const diskCritWhy = async (run: Runner, t: GuardThresholds): Promise<string | undefined> => {
-  const free = t.diskFreeCritGb > 0 ? await sampleDiskFreeGb(run) : null;
-  return free !== null && free < t.diskFreeCritGb ? `disk free ${free.toFixed(1)} GB < guard.diskFreeCritGb ${t.diskFreeCritGb} GB on this host; no new heavy job starts until there is room (jobs already running go on)` : undefined;
 };
 
 // Where the disk went, for the disk alert: the largest entries right under each root, with their account and size, so the
