@@ -169,7 +169,7 @@ const heavyWorkerCommand: Command = async (context) => {
   const load = async () => (await sampleHost(run, config)).load1;
   const at = rest.indexOf("--caller");
   const words = at >= 0 ? [...rest.slice(0, at), ...rest.slice(at + 2)] : rest;
-  process.exitCode = await heavyWorker({ q: config.heavyQueue, deps: heavyDeps(load) }, process.env["SSH_ORIGINAL_COMMAND"] ?? words.join(" "), opt("caller"), await diskCritWhy(run, config.guard));
+  process.exitCode = await heavyWorker({ q: config.heavyQueue, deps: heavyDeps(load) }, process.env["SSH_ORIGINAL_COMMAND"] ?? words.join(" "), opt("caller"));
   return;
 };
 

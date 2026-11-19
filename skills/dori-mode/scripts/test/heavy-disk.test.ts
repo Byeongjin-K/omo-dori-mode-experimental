@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, expect, setDefaultTimeout, test } from "bun:test";
-import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { linesOf } from "../src/heavy-queue.ts";
+import { acquireSlot, admitOnce, releaseSlot } from "../src/heavy-slot.ts";
 import { withState } from "./fakes.ts";
 
 setDefaultTimeout(30_000); // load-proof: each case starts the real CLI, and the running job a systemd scope, as child processes
@@ -25,7 +26,7 @@ const setup = () => {
   const own = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("DORI_") && k !== "SSH_ORIGINAL_COMMAND"));
   const env = { ...own, PATH: `${bin}:${process.env["PATH"] ?? ""}`, DORI_CONFIG: config, DORI_ENV_FILE: join(state.dir, "none.env"), DORI_STATE_DIR: join(state.dir, "state") };
   const freeGb = (gb: number) => writeFileSync(avail, String(gb * 1_048_576));
-  return { env, freeGb };
+  return { env, freeGb, config };
 };
 
 test("under guard.diskFreeCritGb dori heavy takes no new job and says why, while a job already running goes on to its end", async () => {
@@ -59,16 +60,35 @@ test("a dori heavy that a running job starts under guard.diskFreeCritGb is part 
   expect(err).not.toContain("HEAVY_REFUSED");
 });
 
-test("a helper under guard.diskFreeCritGb refuses another host's job before it reads anything", async () => {
-  const { env, freeGb } = setup();
+test("a helper under guard.diskFreeCritGb is busy for another host's job, so the caller tries again later or elsewhere", async () => {
+  const { env, freeGb, config } = setup();
+  writeFileSync(config, JSON.stringify({ ...JSON.parse(readFileSync(config, "utf8")), heavyQueue: { exec: true, jobDir: join(state.dir, "jobs") } }));
+  const ask = async () => {
+    const worker = Bun.spawn([process.execPath, CLI, "heavy-worker", "--caller", "zzangdori"], { env: { ...env, SSH_ORIGINAL_COMMAND: "exec build cpu 100" }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    return { code: await worker.exited, err: await new Response(worker.stderr).text() };
+  };
   freeGb(5);
-  const worker = Bun.spawn([process.execPath, CLI, "heavy-worker", "--caller", "zzangdori"], { env: { ...env, SSH_ORIGINAL_COMMAND: "exec build cpu /tmp/x" }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-  const [code, err] = [await worker.exited, await new Response(worker.stderr).text()];
-  expect(code).toBe(3);
-  expect(err).toContain("WORKER_REFUSED disk free 5.0 GB < guard.diskFreeCritGb 10 GB on this host");
-  // with room again the same request is not refused for the disk
+  const low = await ask();
+  expect(low.code).toBe(75);
+  expect(low.err).toContain("WORKER_BUSY disk free 5.0 GB < guard.diskFreeCritGb 10 GB on this host");
+  // with room again it is admitted (and then finds no job sent on its stdin)
   freeGb(100);
-  const ok = Bun.spawn([process.execPath, CLI, "heavy-worker", "--caller", "zzangdori"], { env: { ...env, SSH_ORIGINAL_COMMAND: "exec build cpu /tmp/x" }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-  await ok.exited;
-  expect(await new Response(ok.stderr).text()).not.toContain("diskFreeCritGb");
+  const ok = await ask();
+  expect(ok.err).toContain("WORKER_ADMIT");
+  expect(ok.err).not.toContain("diskFreeCritGb");
+});
+
+test("a job already waiting in line does not start while the disk is under the floor, and starts once there is room", async () => {
+  const lines: string[] = [];
+  let full: string | undefined = "disk free 5.0 GB < guard.diskFreeCritGb 10 GB on this host";
+  let polls = 0;
+  const clock = { now: () => Date.now(), sleep: async () => { if (++polls === 3) full = undefined; } };
+  const deps = { dir: join(state.dir, "heavy"), slots: 1, maxLoad: 80, clock, pid: process.pid, load: async () => 1, alive: () => true, log: (l: string) => lines.push(l), disk: async () => full };
+  // admitOnce, the admission of a batch item or another host's job, is busy for the disk
+  expect(await admitOnce(deps, "item")).toEqual({ wait: "disk", why: "disk free 5.0 GB < guard.diskFreeCritGb 10 GB on this host" });
+  const slot = await acquireSlot(deps, "waiting", 1);
+  expect(lines[0]).toBe("HEAVY_WAIT waiting: disk free 5.0 GB < guard.diskFreeCritGb 10 GB on this host");
+  expect(lines.at(-1)).toStartWith("HEAVY_ADMIT waiting slot.1");
+  expect(polls).toBe(3);
+  releaseSlot(slot);
 });

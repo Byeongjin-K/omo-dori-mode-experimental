@@ -78,6 +78,35 @@ test("an inbox row that cannot be written is said, and written on the next pass"
   expect(h.rows.map((r) => r.content)).toEqual([first[0] ?? ""]);
 });
 
+test("an ALERT row that could not be written is not lost when the disk recovers before the next pass", async () => {
+  const h = harness();
+  h.failNext(1);
+  await guardPass(sample(10), t, readGuardState(h.deps.statePath), h.deps);
+  // Given: the ALERT row is owed; When: the next pass is already healthy
+  await guardPass(sample(200), t, readGuardState(h.deps.statePath), h.deps);
+  // Then: both rows reach the lead, in order
+  expect(h.rows.map((r) => r.content.split(" ").slice(0, 2).join(" "))).toEqual(["HOST_GUARD ALERT", "HOST_GUARD CLEAR"]);
+  expect(readGuardState(h.deps.statePath).pending).toBeUndefined();
+});
+
+test("a state file that could not be written is written on a later pass even when nothing changed, so a restart does not tell the lead again", async () => {
+  const h = harness();
+  const dir = join(state.dir, "ro");
+  mkdirSync(dir);
+  const deps = { ...h.deps, statePath: join(dir, "guard.json") };
+  const st = readGuardState(deps.statePath);
+  chmodSync(dir, 0o500);
+  const first = guardLines(await guardPass(sample(10), t, st, deps));
+  expect(first.some((l) => l.startsWith(`HOST_GUARD STATE_FAIL ${deps.statePath}`))).toBe(true);
+  chmodSync(dir, 0o700);
+  // the same alert, nothing new: the file is written now
+  expect(guardLines(await guardPass(sample(10), t, st, deps))).toEqual([]);
+  expect(readGuardState(deps.statePath)).toEqual({ alerting: true, kinds: ["disk"], told: true });
+  // a restarted guard reads it and does not tell the same alert again
+  await guardPass(sample(10), t, readGuardState(deps.statePath), deps);
+  expect(h.rows).toHaveLength(1);
+});
+
 test("the largest folders come with their account and size, biggest first, and what cannot be read is named", async () => {
   // Given: two roots and one that is not there; a folder with a part nobody but root reads
   const a = join(state.dir, "tmp");

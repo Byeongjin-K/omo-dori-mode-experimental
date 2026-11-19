@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import type { DoriConfig, GuardThresholds } from "./config.ts";
@@ -144,9 +144,10 @@ export const outsideLines = (procs: readonly HeavyProc[], seen: Set<number>, ali
 };
 
 // kinds: every reason kind (its first word: load, memory, disk, session, panes) seen since the alert began, so a reason
-// that comes and goes during one alert is printed once; told: the lead's inbox has this alert's row; pending: a row not
-// written yet (the inbox write failed), tried again each pass
-export type GuardState = { alerting: boolean; computeReady?: boolean; kinds?: readonly string[]; told?: boolean; pending?: string };
+// that comes and goes during one alert is printed once; told: this alert's row is owed to the lead (in the
+// inbox or in pending); pending: rows not written yet (the inbox write failed), in order, tried again each pass; unsaved:
+// the last write of statePath failed, so it is written again next pass
+export type GuardState = { alerting: boolean; computeReady?: boolean; kinds?: readonly string[]; told?: boolean; pending?: readonly string[]; unsaved?: boolean };
 
 export const guardTick = (s: HostSample, t: GuardThresholds, state: GuardState): string[] => {
   const out: string[] = [];
@@ -185,7 +186,8 @@ export const guardStatePath = (stateDir: string): string => join(stateDir, "guar
 export const readGuardState = (path: string): GuardState => {
   try {
     const s = JSON.parse(readFileSync(path, "utf8")) as GuardState;
-    return { alerting: s.alerting === true, kinds: Array.isArray(s.kinds) ? s.kinds : [], told: s.told === true, ...(typeof s.pending === "string" ? { pending: s.pending } : {}) };
+    const pending = Array.isArray(s.pending) ? s.pending.filter((p): p is string => typeof p === "string") : [];
+    return { alerting: s.alerting === true, kinds: Array.isArray(s.kinds) ? s.kinds : [], told: s.told === true, ...(pending.length ? { pending } : {}) };
   } catch {
     return { alerting: false };
   }
@@ -193,10 +195,13 @@ export const readGuardState = (path: string): GuardState => {
 
 // One guard pass: guardTick's lines, the disk alert with where the disk went, and the lead's inbox told once per alert
 // (its ALERT row when a disk or memory reason first shows, its CLEAR row when that alert is over), kept in statePath so a
-// restarted guard does not tell it again. A failed write is a HOST_GUARD WAKE_FAIL line and is tried again next pass.
+// restarted guard does not tell it again. A failed write is a HOST_GUARD WAKE_FAIL line; the rows wait in order (an ALERT
+// is never dropped for the CLEAR after it) and are tried again next pass, as is a state file that could not be written.
 export const guardPass = async (s: HostSample, t: GuardThresholds, state: GuardState, deps: GuardDeps): Promise<string[]> => {
   const before = new Set(state.alerting ? state.kinds : []);
-  const was = JSON.stringify({ ...state, computeReady: undefined });
+  const saved = (): string => JSON.stringify({ alerting: state.alerting, kinds: state.kinds, told: state.told, ...(state.pending?.length ? { pending: state.pending } : {}) });
+  const was = saved();
+  const queue = [...(state.pending ?? [])];
   const out: string[] = [];
   for (const line of guardTick(s, t, state)) {
     if (line.startsWith("HOST_GUARD ALERT ")) {
@@ -204,29 +209,36 @@ export const guardPass = async (s: HostSample, t: GuardThresholds, state: GuardS
       const full = fresh.includes("disk") ? `${line} | ${await deps.tops()}` : line;
       out.push(full);
       if (!state.told && fresh.some((k) => WAKE_KINDS.includes(k))) {
-        state.pending = full;
+        queue.push(full);
         state.told = true;
       }
     } else if (line.startsWith("HOST_GUARD CLEAR ")) {
       out.push(line);
-      if (state.told) state.pending = line;
+      if (state.told) queue.push(line);
       state.told = false;
     } else out.push(line);
   }
-  if (state.pending) {
+  while (queue.length) {
     try {
-      deps.inbox("host-guard", `host-guard-${new Date(deps.now()).toISOString()}`, state.pending);
-      delete state.pending;
+      deps.inbox("host-guard", `host-guard-${new Date(deps.now()).toISOString()}`, queue[0] ?? "");
+      queue.shift();
     } catch (e) {
-      out.push(`HOST_GUARD WAKE_FAIL the lead's inbox row was not written (${e instanceof Error ? e.message : String(e)}); tried again next pass`);
+      out.push(`HOST_GUARD WAKE_FAIL the lead's inbox row was not written (${e instanceof Error ? e.message : String(e)}); ${queue.length} row(s) tried again next pass`);
+      break;
     }
   }
-  if (JSON.stringify({ ...state, computeReady: undefined }) !== was) {
+  state.pending = queue;
+  if (saved() !== was || state.unsaved) {
+    // written beside it and renamed over it, so a reader never sees half a file
+    const tmp = `${deps.statePath}.tmp`;
     try {
       mkdirSync(dirname(deps.statePath), { recursive: true });
-      writeFileSync(deps.statePath, `${JSON.stringify({ alerting: state.alerting, kinds: state.kinds, told: state.told, ...(state.pending ? { pending: state.pending } : {}) })}\n`);
+      writeFileSync(tmp, `${saved()}\n`);
+      renameSync(tmp, deps.statePath);
+      state.unsaved = false;
     } catch (e) {
-      out.push(`HOST_GUARD STATE_FAIL ${deps.statePath} (${e instanceof Error ? e.message : String(e)}); a restarted guard may tell the lead again`);
+      state.unsaved = true;
+      out.push(`HOST_GUARD STATE_FAIL ${deps.statePath} (${e instanceof Error ? e.message : String(e)}); tried again next pass, and a guard restarted before then may tell the lead again`);
     }
   }
   return out;
