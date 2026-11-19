@@ -444,7 +444,11 @@ def lock_inbox(note_after: int = 5) -> tuple[str, int]:
             fd = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX)
-                if os.path.exists(lock) and os.stat(lock).st_ino == os.fstat(fd).st_ino:
+                try:
+                    same = os.stat(lock).st_ino == os.fstat(fd).st_ino
+                except FileNotFoundError:  # another writer's release removed it while this one checked: take it again
+                    same = False
+                if same:
                     return lock, fd
             except BaseException:
                 os.close(fd)

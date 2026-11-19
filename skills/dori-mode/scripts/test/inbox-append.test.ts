@@ -68,7 +68,7 @@ const LOAD = "import fcntl, importlib.machinery as m, importlib.util as u, io, j
 const setupWriters: Record<string, (inbox: string, row: unknown) => { cmd: string[]; env: Record<string, string> }> = {
   "upstream-watch.py": (inbox, row) => ({ cmd: ["/usr/bin/python3", "-I", "-B", "-c", `${LOAD}mod.append_inbox(row)`, join(SETUPS, "upstream-watch.py"), JSON.stringify(row)], env: { UPSTREAM_WATCH_INBOX: inbox } }),
   "dori-file-relay": (inbox, row) => ({
-    cmd: ["/usr/bin/python3", "-I", "-B", "-c", `${LOAD}sys.argv = ['boot', '0', 'inbox', sys.argv[3], sys.argv[4]]; sys.stdin = io.TextIOWrapper(io.BytesIO((json.dumps(row) + '\\n').encode())); exec(compile(mod.INBOX.replace('@MAX_PARTS@', '2').replace('@MAX_DEPTH@', '0'), 'inbox', 'exec'), {})`, join(SETUPS, "dori-file-relay"), JSON.stringify(row), dirname(dirname(inbox)), inbox],
+    cmd: ["/usr/bin/python3", "-I", "-B", "-c", `${LOAD}sys.argv = ['boot', '0', 'inbox', sys.argv[3], sys.argv[4], '30']; sys.stdin = io.TextIOWrapper(io.BytesIO((json.dumps(row) + '\\n').encode())); exec(compile(mod.INBOX.replace('@MAX_PARTS@', '2').replace('@MAX_DEPTH@', '0'), 'inbox', 'exec'), {})`, join(SETUPS, "dori-file-relay"), JSON.stringify(row), dirname(dirname(inbox)), inbox],
     env: {},
   }),
 };
@@ -106,13 +106,13 @@ test.each(Object.keys(setupWriters))("%s appends under <inbox>.lock: it waits wh
 // review 8 of #509: a wait with a deadline turned a row away while another writer held the lock, and every caller had
 // marked its message seen by then, so the row was lost. An append now waits for as long as the lock is held; past 5 s it
 // says so once on stderr (a holder that is stuck, not dead, stops every writer) and goes on waiting. The listener's writer
-// and both Python setup writers, each held past 5 s by this process.
+// and upstream-watch.py, each held past 5 s by this process (the relay keeps the file instead: file-relay.test.ts).
 const probeWriter = (inbox: string, row: unknown) => {
   const probe = join(dirname(inbox), "append.ts");
   writeFileSync(probe, `import { appendInboxRow } from ${JSON.stringify(join(import.meta.dir, "../src/inbox-append.ts"))};\nappendInboxRow(${JSON.stringify(inbox)}, ${JSON.stringify(row)});\n`);
   return { cmd: [process.execPath, probe], env: {} };
 };
-const heldWriters = { "inbox-append.ts": probeWriter, ...setupWriters };
+const heldWriters = { "inbox-append.ts": probeWriter, "upstream-watch.py": setupWriters["upstream-watch.py"]! };
 
 test.each(Object.keys(heldWriters))("%s waits past 5 s for a held lock with one INBOX_LOCK_WAIT line, writes nothing meanwhile, and its row goes in once when the lock is let go", async (name) => {
   const inbox = join(state.dir, "za", ".za", "inbox.jsonl");
@@ -127,5 +127,22 @@ test.each(Object.keys(heldWriters))("%s waits past 5 s for a held lock with one 
   release();
   const [code, rest] = [await p.exited, await until(err, "")];
   expect({ code, waits: (said + rest).split("\n").filter((l) => l.startsWith("INBOX_LOCK_WAIT")) }).toEqual({ code: 0, waits: [`INBOX_LOCK_WAIT ${inbox} 5`] });
+  expect(rows(inbox)).toEqual([B, C]);
+});
+
+// review 9 of #509: a release removes the lock file, so another writer can remove the file a waiter just locked while that
+// waiter checks it; the check must then take the lock again, not fail the append. The lock file is removed at the first,
+// then at the second look the writer takes at the lock path after its flock.
+test.each(Object.keys(setupWriters).flatMap((name) => [[name, 1], [name, 2]] as const))("%s takes the lock again when the lock file is removed at its look number %i", async (name, nth) => {
+  const inbox = join(state.dir, "za", ".za", "inbox.jsonl");
+  mkdirSync(join(state.dir, "za", ".za"), { recursive: true });
+  appendInboxRow(inbox, B);
+  const w = setupWriters[name]!(inbox, C);
+  const gone = `import os; stat = os.stat; looks = [0]\ndef look(p, *a, **k):\n    if str(p).endswith('.lock'):\n        looks[0] += 1\n        if looks[0] == ${nth}: os.unlink(p)\n    return stat(p, *a, **k)\nos.stat = look\n`;
+  const cmd = [...w.cmd];
+  cmd[4] = gone + cmd[4]!.replaceAll("; ", "\n");
+  const p = Bun.spawn(cmd, { env: { PATH: "/usr/bin:/bin", ...w.env }, stdout: "pipe", stderr: "pipe" });
+  const [code, err] = [await p.exited, await new Response(p.stderr).text()];
+  expect({ code, err: err.replace("APPENDED\n", "") }).toEqual({ code: 0, err: "" });
   expect(rows(inbox)).toEqual([B, C]);
 });
