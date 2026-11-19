@@ -1,4 +1,5 @@
 import { type GoalAct, goalCommand, type GoalRead, liveSession } from "./goal.ts";
+import { scratchLeft } from "./scratch.ts";
 import { paneLife } from "./aoe.ts";
 import type { DoriConfig } from "./config.ts";
 import type { Question } from "./messenger/discord-cards.ts";
@@ -116,7 +117,8 @@ export const claimDone = async (deps: FlowDeps, lane: Lane, evidence: string, su
   const claim = { at, evidence, emitted: false, ...(summary?.trim() ? { summary: summary.trim() } : {}), ...(posted ? { posted } : {}) };
   const outcome = claimOutcome(deps, lane, at, opts.rolloverOutcome);
   if (outcome.missing) return outcome.missing;
-  const postedLine = posted ? `\nRESULT_ALREADY_POSTED ${lane.key} ${posted}: the close posts no summary in the thread (the lane's result is there); --post-summary posts it anyway` : "";
+  const scratch = scratchLeft(lane.key);
+  const postedLine = `${posted ? `\nRESULT_ALREADY_POSTED ${lane.key} ${posted}: the close posts no summary in the thread (the lane's result is there); --post-summary posts it anyway` : ""}${scratch ? `\n${scratch}` : ""}`;
   // A paused lane waits on a human, so its claim is recorded and announced but never closes it on a timer.
   if (statusOf(lane) === "paused") {
     await deps.registry.write({ ...lane, claim, history: [...(lane.history ?? []), { at, status: "paused", note: `done claimed while paused: ${evidence}` }] });

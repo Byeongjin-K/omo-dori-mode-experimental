@@ -43,7 +43,7 @@ const settle = async (deps: FlowDeps, lane: Lane, evidence: string): Promise<str
     if (gate) return [gate, await objectDone(deps, current, [`${gate.startsWith("CLOSE_SUMMARY_MISSING ") ? "no summary for the owner's thread" : "the summary did not reach the owner's thread"} (${gate.split(": ").slice(1).join(": ").slice(0, 300)}); claim again with dori claim-done ${lane.key} --evidence \"...\" --summary \"<2 to 5 plain lines in the owner's language: what changed, what is left, when it reaches where it is used>\"`])];
     return [await objectDone(deps, current, result.lines.filter((l) => l.startsWith("SIGNAL NOT")))];
   }
-  return [...result.lines.filter((l) => l.startsWith("CLOSE_SUMMARY ") || l.startsWith("COST ") || l.startsWith("THREAD_MISSING ") || l.startsWith("THREAD_DONE_WARN ") || l.startsWith("THREAD_STATUS_WARN ")), `LANE_CLOSED ${lane.key} ${result.lines.at(-1)?.split(" ").slice(2).join(" ") ?? ""}`];
+  return [...result.lines.filter((l) => l.startsWith("CLOSE_SUMMARY ") || l.startsWith("COST ") || l.startsWith("THREAD_MISSING ") || l.startsWith("THREAD_DONE_WARN ") || l.startsWith("THREAD_STATUS_WARN ") || l.startsWith("DORI_SCRATCH_LEFT ")), `LANE_CLOSED ${lane.key} ${result.lines.at(-1)?.split(" ").slice(2).join(" ") ?? ""}`];
 };
 
 // dori watch outlives a handover that moves leadPane (it restarts only handover.services), and the frozen record and the
