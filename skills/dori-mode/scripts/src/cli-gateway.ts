@@ -8,12 +8,27 @@ import { Gateway, gatewaySocketPath, type LeadPort, unixConnector } from "./mess
 import type { InboundFrame, StatusPhase, WorkRow } from "./messenger/gateway-frames.ts";
 import { writeLineSync } from "./messenger/telegram-inbound.ts";
 import { realClock } from "./run.ts";
+import { duplicateLine, SEND_DUPLICATE_EXIT, type Sent, sendKey, sendOnce, sentLine } from "./send-dedupe.ts";
+import { join } from "node:path";
 
 const PHASES: ReadonlySet<string> = new Set(["start", "update", "stop"]);
 const STATES: ReadonlySet<string> = new Set(["running", "done", "failed"]);
-const SEND_OPTIONS = ["text", "text-file", "edit", "status", "status-id", "row", "question", "option", "receipt", "line"];
+const SEND_OPTIONS = ["text", "text-file", "edit", "status", "status-id", "row", "question", "option", "receipt", "line", "again"];
 
-const gateway = (cli: Cli): Gateway => new Gateway(unixConnector, realClock, gatewaySocketPath(cli.config.gateway.socket));
+const socketOf = (cli: Cli): string => gatewaySocketPath(cli.config.gateway.socket);
+const gateway = (cli: Cli): Gateway => new Gateway(unixConnector, realClock, socketOf(cli));
+
+// A new message (post, question, receipt) goes out once per conversation and content, as every dori send does
+// (src/send-dedupe.ts: SEND_DUPLICATE, exit 3, --again sends it once more); status rows and edits change a message in place
+// and are never checked (review 2 of #511: upstream #255's op_id stops only a retry inside one call).
+const once = async (cli: Cli, parts: readonly string[], send: () => Promise<Sent>): Promise<string | undefined> => {
+  const place = `gateway:${socketOf(cli)}`;
+  const r = await sendOnce(join(cli.config.stateDir, "sent"), place, sendKey([place, ...parts]), send, { again: Boolean(cli.flags.values.again) });
+  if (!r.duplicate) return r.id;
+  console.log(duplicateLine(place, r));
+  process.exitCode = SEND_DUPLICATE_EXIT;
+  return undefined;
+};
 
 /** `--row running:Build the image`; rows are numbered by position, so the same list keeps its ids across updates. */
 const rowsOf = (cli: Cli): WorkRow[] =>
@@ -41,6 +56,7 @@ export const sendGateway = async (cli: Cli): Promise<void> => {
   const phase = opt("status");
   const question = opt("question");
   const receipt = opt("receipt");
+  if (flags.values.again && (phase !== undefined || flags.values.edit !== undefined)) die("--again is for a new message; an edit or a status row is never checked for repeats");
   if (phase !== undefined) {
     if (!PHASES.has(phase)) die("--status takes start, update or stop, with gateway");
     console.log(`STATUS ${await gw.status(phase as StatusPhase, await text(), rowsOf(cli), opt("status-id"))}`);
@@ -48,14 +64,22 @@ export const sendGateway = async (cli: Cli): Promise<void> => {
     const options = cli.many("option").map((label, i) => ({ id: `o${i + 1}`, label }));
     if (!question) die("--question needs the question text");
     if (options.length < 2) die("--question needs at least two --option");
-    console.log(`QUESTION ${await gw.question(postable(question, "send"), options)}`);
+    const text = postable(question, "send");
+    const id = await once(cli, ["question", text, ...options.map((o) => o.label)], async () => ({ id: await gw.question(text, options) }));
+    if (id) console.log(`QUESTION ${id}`);
   } else if (receipt !== undefined) {
-    console.log(`SENT ${await gw.receipt(receipt, linesOf(cli))}`);
+    const lines = linesOf(cli);
+    const id = await once(cli, ["receipt", receipt, ...lines.flatMap((l) => [l.label, l.value])], async () => ({ id: await gw.receipt(receipt, lines) }));
+    // the socket answers with no copy of what it stored, so the line says content=not-returned
+    if (id) console.log(sentLine("SENT", { id }));
   } else {
     const body = await text();
     const target = flags.values.edit === undefined ? undefined : opt("edit") || die("--edit is empty: leave it out to post a new message");
     if (target !== undefined) await gw.edit(target, body);
-    else console.log(`SENT ${await gw.post(body)}`);
+    else {
+      const id = await once(cli, ["post", body], async () => ({ id: await gw.post(body) }));
+      if (id) console.log(sentLine("SENT", { id }));
+    }
   }
 };
 

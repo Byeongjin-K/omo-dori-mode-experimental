@@ -78,3 +78,19 @@ test("inbound gateway whose stdout refuses the line acks nothing, so the gateway
     expect(frames.filter((f) => f["op"] === "ack")).toEqual([]);
   }, reply);
 });
+
+test("the same gateway message twice is sent once, also when both start together; --again sends it once more (review 2 of #511)", async () => {
+  await withSocket(async (path, frames, dir) => {
+    // Given one state dir; when the same text is sent twice in a row, then twice at the same moment, then with --again.
+    const first = await dori(path, dir, "--text", "the tests pass");
+    const second = await dori(path, dir, "--text", "the tests pass");
+    const together = await Promise.all([dori(path, dir, "--question", "Merge?", "--option", "Yes", "--option", "No"), dori(path, dir, "--question", "Merge?", "--option", "Yes", "--option", "No")]);
+    const again = await dori(path, dir, "--text", "the tests pass", "--again");
+    // Then the repeat names the first message and exits 3, one of the two together posts, and --again posts.
+    expect(first.code).toBe(0);
+    expect([second.code, second.out.split(" ")[0]]).toEqual([3, "SEND_DUPLICATE"]);
+    expect(together.map((r) => r.code).sort()).toEqual([0, 3]);
+    expect(again.code).toBe(0);
+    expect(frames.map((f) => f["kind"])).toEqual(["post", "question", "post"]);
+  });
+});

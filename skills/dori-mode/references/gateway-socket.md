@@ -60,10 +60,11 @@ An answer names its question and carries `option_id`, `text`, or both.
 
 ## The lines the CLI prints
 
-- `dori send gateway --text T` (or `--text-file FILE`) prints `SENT <id>`; `--edit <id>` edits in place and prints nothing. A text with a literal `\n` and no real line break is refused (`SEND_LITERAL_NEWLINE`), and an option of another messenger is refused (`UNKNOWN_OPTION`), before anything is written.
+- `dori send gateway --text T` (or `--text-file FILE`) prints `SENT <id> content=not-returned` (the socket answers with no copy of what it stored); `--edit <id>` edits in place and prints nothing. A text with a literal `\n` and no real line break is refused (`SEND_LITERAL_NEWLINE`), and an option of another messenger is refused (`UNKNOWN_OPTION`), before anything is written.
 - `--status start|update|stop --text T [--status-id ID] [--row running:LABEL ...]` prints `STATUS <id>`; rows are numbered `r1`, `r2`, ... by position.
 - `--question T --option LABEL --option LABEL ...` prints `QUESTION <id>`; options are numbered `o1`, `o2`, ... (In the fork `--question` takes the question text: upstream writes `--question --text T`, but the fork's option table has `--question` as a value flag.)
-- `--receipt TITLE --line LABEL=VALUE ...` prints `SENT <id>`.
+- `--receipt TITLE --line LABEL=VALUE ...` prints `SENT <id> content=not-returned`.
+- In the fork a new message (post, question, receipt) goes out once per conversation and content, as every `dori send` does: the same one again within 10 minutes, or equal to the conversation's last post, prints `SEND_DUPLICATE` and exits 3, and `--again` sends it once more. Edits and status rows are never checked (review 2 of #511; upstream's `op_id` stops only a retry inside one call).
 - `dori inbound gateway [--session ID]` subscribes as the lead session (default `PI_SESSION_ID`), prints `INBOUND_READY gateway`, then one line per message, in the other messengers' field order:
 
 ```
