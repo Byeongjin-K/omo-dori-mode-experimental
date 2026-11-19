@@ -4,8 +4,9 @@
 /** dori send gateway and dori inbound gateway: the dori.bot surface over the gateway's local socket. */
 import type { Cli } from "./cli-context.ts";
 import { die } from "./cli-context.ts";
-import { Gateway, gatewaySocketPath, unixConnector } from "./messenger/gateway.ts";
+import { Gateway, gatewaySocketPath, type LeadPort, unixConnector } from "./messenger/gateway.ts";
 import type { InboundFrame, StatusPhase, WorkRow } from "./messenger/gateway-frames.ts";
+import { writeLineSync } from "./messenger/telegram-inbound.ts";
 import { realClock } from "./run.ts";
 
 const PHASES: ReadonlySet<string> = new Set(["start", "update", "stop"]);
@@ -58,15 +59,29 @@ export const sendGateway = async (cli: Cli): Promise<void> => {
   }
 };
 
-/** The shape of the other messengers' lines: `INBOUND <source> <channel> <thread|-> <id> <user|-> <json text>`. */
+/**
+ * The shape of the other messengers' lines: `INBOUND <source> <channel> <thread|-> <id> <user|-> <json text>`. The whole
+ * text, as dori inbound slack prints it: the line is the only copy the lead gets before the ack (review 1 of #511; upstream
+ * #255 cut it at 200 characters).
+ */
 export const formatGatewayInbound = (sessionId: string, i: InboundFrame): string =>
   i.kind === "message"
-    ? `INBOUND gateway ${sessionId} - ${i.id} - ${JSON.stringify(i.text.slice(0, 200))}`
-    : `INBOUND gateway:answer ${sessionId} ${i.question_id} ${i.id} - ${JSON.stringify((i.text ?? "").slice(0, 200))}${i.option_id ? ` option=${i.option_id}` : ""}`;
+    ? `INBOUND gateway ${sessionId} - ${i.id} - ${JSON.stringify(i.text)}`
+    : `INBOUND gateway:answer ${sessionId} ${i.question_id} ${i.id} - ${JSON.stringify(i.text ?? "")}${i.option_id ? ` option=${i.option_id}` : ""}`;
+
+/**
+ * The lead side of the subscription: one INBOUND line per message or answer. writeLineSync, not console.log, which drops a
+ * failed write (a closed stdout): a line stdout did not take throws, so it is never acked and the gateway resends it, as
+ * dori inbound telegram keeps its offset (review 1 of #511).
+ */
+export const gatewayLead =
+  (write: (line: string) => void = (line) => void writeLineSync(line)): LeadPort =>
+  (session, inbound) =>
+    write(`${formatGatewayInbound(session, inbound)}\n`);
 
 export const inboundGateway = async (cli: Cli): Promise<void> => {
   cli.onlyOptions("inbound gateway", ["session"], 1);
   const sessionId = cli.opt("session") || process.env["PI_SESSION_ID"] || die("inbound gateway needs --session or PI_SESSION_ID");
   console.log("INBOUND_READY gateway");
-  await gateway(cli).subscribe(sessionId, (session, inbound) => console.log(formatGatewayInbound(session, inbound)));
+  await gateway(cli).subscribe(sessionId, gatewayLead());
 };

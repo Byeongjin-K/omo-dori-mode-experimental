@@ -55,7 +55,8 @@ An answer names its question and carries `option_id`, `text`, or both.
 
 - `ok` and `queued` are success. `unavailable`, a refused connection and a connection that closes before answering are retried with backoff (1, 2, 4, 8 s; five attempts), with the same `op_id`; after the last one the command exits non-zero with `gateway_unavailable`. Any other code is not retried and is reported as `gateway refused the <kind>: <code>`.
 - Text that contains `$(` is refused before anything is written, as in the other messengers.
-- Inbound: after `subscribe` the client hands each `inbound` frame to the lead session, then writes its `ack`. A dropped stream is reopened with the same backoff and the session announced again. The gateway resends what was not acked; a `seq` already handed over is acked again without a second hand-off.
+- Inbound: after `subscribe` the client hands each `inbound` frame to the lead session, then writes its `ack`. A dropped stream, or a subscription answered `unavailable`, is reopened with the same backoff and the session announced again; any other refusal ends it. The gateway resends what was not acked; a `seq` already handed over is acked again without a second hand-off.
+- In the fork (review 1 of #511): the INBOUND line carries the whole text (upstream cut it at 200 characters), and it is written with a checked write, so a line stdout did not take (a pipe whose reader is gone) ends the command with no ack and the gateway resends it.
 
 ## The lines the CLI prints
 

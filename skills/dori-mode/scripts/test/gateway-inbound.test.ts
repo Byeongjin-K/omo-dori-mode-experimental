@@ -1,7 +1,7 @@
 // Ported from upstream dori-superagent #255 (https://github.com/sisyphuslabs/dori-superagent/pull/255).
 import { expect, test } from "bun:test";
 
-import { formatGatewayInbound } from "../src/cli-gateway.ts";
+import { formatGatewayInbound, gatewayLead } from "../src/cli-gateway.ts";
 import { Gateway } from "../src/messenger/gateway.ts";
 import type { InboundFrame } from "../src/messenger/gateway-frames.ts";
 import { memoryGateway, recordingClock } from "./gateway-fakes.ts";
@@ -83,4 +83,66 @@ test("an inbound line keeps the other messengers' field order", () => {
     `INBOUND gateway ${SESSION} - m1 - "hi there"`,
   );
   expect(formatGatewayInbound(SESSION, answer)).toBe(`INBOUND gateway:answer ${SESSION} op-6 m2 - "x" option=o1`);
+});
+
+// Review 1 of #511 (fork fixes on top of upstream #255): the whole text reaches the lead, an inbound line that could not
+// be written is never acked, and a subscription answered unavailable is retried with backoff.
+const once = (frames: Record<string, unknown>[]) =>
+  memoryGateway(
+    (frame, peer) => {
+      if (frame["op"] !== "subscribe") return;
+      peer.reply({ op: "result", re: "subscribe", code: "ok" });
+      for (const f of frames) peer.reply(f);
+      peer.drop();
+    },
+    (attempt) => attempt > 1,
+  );
+
+test("a message or an answer longer than 200 characters reaches the lead whole", async () => {
+  const long = `${"a".repeat(250)} end`;
+  const gw = once([message(1, long), { ...message(2, ""), kind: "answer", question_id: "op-6", option_id: "o1", text: long }]);
+  const lines: string[] = [];
+  const done = new Gateway(gw.connector, recordingClock(), "/sock").subscribe(SESSION, gatewayLead((line) => void lines.push(line)));
+  await expect(done).rejects.toThrow("gateway_unavailable");
+  expect(lines).toEqual([
+    `INBOUND gateway ${SESSION} - m1 - ${JSON.stringify(long)}\n`,
+    `INBOUND gateway:answer ${SESSION} op-6 m2 - ${JSON.stringify(long)} option=o1\n`,
+  ]);
+});
+
+test("an inbound line stdout did not take is not acked, and the stream stops so the gateway resends it", async () => {
+  const gw = once([message(1, "hello")]);
+  const closedStdout = () => {
+    throw new Error("EPIPE: broken pipe, write");
+  };
+  const done = new Gateway(gw.connector, recordingClock(), "/sock").subscribe(SESSION, gatewayLead(closedStdout));
+  await expect(done).rejects.toThrow("EPIPE");
+  expect(gw.received.filter((f) => f["op"] === "ack")).toEqual([]);
+});
+
+test("a subscription answered unavailable is retried with backoff, not ended", async () => {
+  const gw = memoryGateway(
+    (frame, peer) => {
+      if (frame["op"] !== "subscribe") return;
+      if (peer.connection === 1) return peer.reply({ op: "result", re: "subscribe", code: "unavailable" });
+      peer.reply({ op: "result", re: "subscribe", code: "ok" });
+      peer.reply(message(1, "hello"));
+      peer.drop();
+    },
+    (attempt) => attempt > 2,
+  );
+  const handed: number[] = [];
+  const clock = recordingClock();
+  const done = new Gateway(gw.connector, clock, "/sock").subscribe(SESSION, (_, i) => void handed.push(i.seq));
+  await expect(done).rejects.toThrow("gateway_unavailable");
+  expect(handed).toEqual([1]);
+  expect(gw.received.filter((f) => f["op"] === "subscribe")).toHaveLength(2);
+  expect(clock.slept[0]).toBe(1_000);
+});
+
+test("a permanent subscription refusal still ends the stream at once", async () => {
+  const gw = memoryGateway((frame, peer) => (frame["op"] === "subscribe" ? peer.reply({ op: "result", re: "subscribe", code: "invalid" }) : undefined));
+  const done = new Gateway(gw.connector, recordingClock(), "/sock").subscribe(SESSION, () => {});
+  await expect(done).rejects.toThrow("gateway refused the subscription: invalid");
+  expect(gw.attempts()).toBe(1);
 });

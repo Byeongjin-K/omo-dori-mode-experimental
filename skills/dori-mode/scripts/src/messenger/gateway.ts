@@ -157,8 +157,11 @@ export class Gateway {
           conn.write(JSON.stringify({ op: "subscribe", session_id: sessionId } satisfies DoriToGatewayFrame));
           for (let line = await conn.next(); line !== undefined; line = await conn.next()) {
             const frame = parseGatewayLine(line);
+            // unavailable is the gateway's transient answer: retried with backoff like a dropped connection, the watermark
+            // kept (review 1 of #511, fork fix on upstream #255); any other refusal ends the stream
             if (frame?.op === "result" && frame.re === "subscribe")
               if (frame.code === "ok") failures = 0;
+              else if (frame.code === "unavailable") break;
               else throw new MessengerError(`gateway refused the subscription: ${frame.code}`, 0, frame.code);
             if (frame?.op !== "inbound") continue;
             if (frame.seq > handed) {

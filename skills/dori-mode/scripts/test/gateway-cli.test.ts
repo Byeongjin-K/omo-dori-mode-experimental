@@ -8,19 +8,23 @@ import { run } from "../src/run.ts";
 import { viaEnvFile, withState } from "./fakes.ts";
 setDefaultTimeout(30_000); // load-proof: each test starts the dori CLI (bun src/cli.ts) as a child process, as send-cli.test.ts does
 
-const withSocket = async (body: (path: string, frames: Record<string, unknown>[], dir: string) => Promise<void>) => {
+type Reply = (frame: Record<string, unknown>, connection: number) => readonly Record<string, unknown>[];
+const okReply: Reply = (frame) => [{ op: "result", re: frame["op"], code: "ok", op_id: frame["op_id"] }];
+const withSocket = async (body: (path: string, frames: Record<string, unknown>[], dir: string) => Promise<void>, reply: Reply = okReply) => {
   const state = withState();
   const path = join(state.dir, "dori.sock");
   const frames: Record<string, unknown>[] = [];
-  const server = createServer((socket) =>
+  let connections = 0;
+  const server = createServer((socket) => {
+    const connection = ++connections;
     socket.on("data", (chunk) => {
       for (const line of String(chunk).split("\n").filter(Boolean)) {
         const frame = JSON.parse(line) as Record<string, unknown>;
         frames.push(frame);
-        socket.write(`${JSON.stringify({ op: "result", re: frame["op"], code: "ok", op_id: frame["op_id"] })}\n`);
+        for (const answer of reply(frame, connection)) socket.write(`${JSON.stringify(answer)}\n`);
       }
-    }),
-  );
+    });
+  });
   await new Promise<void>((resolve) => server.listen(path, resolve));
   try {
     await body(path, frames, state.dir);
@@ -53,4 +57,24 @@ test("a gateway send with an option of another messenger or a discord status is 
     expect(results.map((r) => r.code)).toEqual([2, 1, 1]);
     expect(frames).toEqual([]);
   });
+});
+
+test("inbound gateway whose stdout refuses the line acks nothing, so the gateway keeps the message to resend (review 1 of #511)", async () => {
+  // Given a gateway that pushes one message on the first subscription and refuses any later one, and answers an ack
+  // with a refusal, so the CLI ends either way.
+  const reply: Reply = (frame, connection) =>
+    frame["op"] !== "subscribe"
+      ? [{ op: "result", re: "subscribe", code: "invalid" }]
+      : connection > 1
+        ? [{ op: "result", re: "subscribe", code: "invalid" }]
+        : [{ op: "result", re: "subscribe", code: "ok" }, { op: "inbound", seq: 1, session_id: "lead-1", id: "m1", created_at: 1, kind: "message", text: "hello" }];
+  await withSocket(async (path, frames, dir) => {
+    // When the monitor's stdout refuses every write (/dev/full, as a pipe whose reader is gone does; a closed fd 1 is
+    // reopened on /dev/null by bun, where no writer can tell).
+    const env = viaEnvFile(["env", `DORI_CONFIG=${join(dir, "missing.json")}`, `DORI_STATE_DIR=${join(dir, "state")}`, `DORI_ENV_FILE=${join(dir, "missing.env")}`, `DORI_GATEWAY_SOCKET=${path}`]);
+    const result = await run(["sh", "-c", 'exec "$@" > /dev/full', "sh", ...env, "bun", join(import.meta.dir, "../src/cli.ts"), "inbound", "gateway", "--session", "lead-1"]);
+    // Then it fails, and no ack went out for the message nobody saw.
+    expect(result.code).not.toBe(0);
+    expect(frames.filter((f) => f["op"] === "ack")).toEqual([]);
+  }, reply);
 });
