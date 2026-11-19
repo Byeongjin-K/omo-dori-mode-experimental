@@ -68,13 +68,14 @@ const DU_SEC = 120;
 const size = (kb: number): string => (kb >= 10 * 1_048_576 ? `${Math.round(kb / 1_048_576)}G` : kb >= 1_048_576 ? `${(kb / 1_048_576).toFixed(1)}G` : kb >= 1024 ? `${Math.round(kb / 1024)}M` : `${kb}K`);
 export const diskTops = async (run: Runner, roots: readonly string[] = DISK_ROOTS, n = 5): Promise<string> => {
   const found: { path: string; kb: number }[] = [];
-  const unread: string[] = [];
+  // kb: what du still counted there (Infinity: a root it could not list or stopped in), so the examples are the most telling
+  const unread: { text: string; kb: number }[] = [];
   for (const root of roots) {
     let paths: string[];
     try {
       paths = readdirSync(root).map((name) => join(root, name));
     } catch (e) {
-      unread.push(`${root} (${e instanceof Error && "code" in e ? String(e.code) : String(e)})`);
+      unread.push({ text: `${root} (${e instanceof Error && "code" in e ? String(e.code) : String(e)})`, kb: Number.POSITIVE_INFINITY });
       continue;
     }
     if (!paths.length) continue;
@@ -84,15 +85,17 @@ export const diskTops = async (run: Runner, roots: readonly string[] = DISK_ROOT
       const kb = Number(new RegExp(`^(\\d+)\\t${p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "m").exec(du.out)?.[1]);
       const partial = errs.some((e) => ["/", "'", "\u2019"].some((end) => e.includes(`${p}${end}`)));
       if (Number.isFinite(kb)) found.push({ path: p, kb });
-      if (partial || !Number.isFinite(kb)) unread.push(`${p} (${Number.isFinite(kb) ? "일부만 셈" : "못 셈"})`);
+      if (partial || !Number.isFinite(kb)) unread.push({ text: `${p} (${Number.isFinite(kb) ? "일부만 셈" : "못 셈"})`, kb: Number.isFinite(kb) ? kb : 0 });
     }
-    if (du.code === 124) unread.push(`${root} (du stopped after ${DU_SEC} s)`);
+    if (du.code === 124) unread.push({ text: `${root} (du stopped after ${DU_SEC} s)`, kb: Number.POSITIVE_INFINITY });
   }
   const top = found.sort((a, b) => b.kb - a.kb).slice(0, n);
   const st = top.length ? await run(["stat", "-c", "%U\t%n", "--", ...top.map((x) => x.path)]) : { out: "" };
   const owner = new Map(st.out.split("\n").flatMap((l) => (l.includes("\t") ? [[l.slice(l.indexOf("\t") + 1), l.slice(0, l.indexOf("\t"))] as const] : [])));
   const list = top.map((x) => `${x.path} (${owner.get(x.path) ?? "account 못 읽음"}) ${size(x.kb)}`).join(", ") || "nothing read";
-  return `largest under ${roots.join(" ")}: ${list}${unread.length ? `; 못 읽음: ${unread.join(", ")}` : ""}`;
+  // one count and n examples: /tmp holds thousands of other accounts' small folders du reads only in part (0a83, 2026-11-19)
+  const examples = unread.sort((a, b) => b.kb - a.kb).slice(0, n).map((u) => u.text).join(", ");
+  return `largest under ${roots.join(" ")}: ${list}${unread.length ? `; 못 읽음 ${unread.length}곳: ${examples}${unread.length > n ? ", ..." : ""}` : ""}`;
 };
 
 export const alertReasons = (s: HostSample, t: GuardThresholds): string[] => {

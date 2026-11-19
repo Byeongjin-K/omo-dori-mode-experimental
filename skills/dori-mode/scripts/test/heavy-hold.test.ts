@@ -137,7 +137,7 @@ test("a --helpers-only job that every helper refused ends with exit 2 and a line
 // the CLI with a config of its own: a test never reads or writes the host's real hold directory
 const cli = (args: string[], helpers: unknown[] = []) => {
   const config = join(state.dir, "config.json");
-  writeFileSync(config, JSON.stringify({ stateDir: join(state.dir, "state"), heavyMaxLoad: 1e9, heavyHoldDir: hold, heavyQueue: { helpers } }));
+  writeFileSync(config, JSON.stringify({ stateDir: join(state.dir, "state"), heavyMaxLoad: 1e9, heavyHoldDir: hold, guard: { diskFreeCritGb: 0 }, heavyQueue: { helpers } }));
   const own = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("DORI_")));
   return Bun.spawn(["setsid", process.execPath, CLI, "heavy", ...args], { env: { ...own, DORI_CONFIG: config, DORI_ENV_FILE: join(state.dir, "none.env"), DORI_STATE_DIR: join(state.dir, "state") }, cwd: state.dir, stdout: "pipe", stderr: "pipe" });
 };

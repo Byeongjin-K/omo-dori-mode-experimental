@@ -39,7 +39,7 @@ const caller = (name: string, ssh: string[], staleMin: number, path?: string, mo
   mkdirSync(join(dir, "heavy", "slot.1"), { recursive: true });
   writeFileSync(join(dir, "heavy", "slot.1", "owner"), `${process.pid} hold ${new Date().toISOString()}`);
   const config = join(state.dir, "caller.json");
-  writeFileSync(config, JSON.stringify({ stateDir: dir, heavySlots: 1, heavyMaxSlots: 1, heavyHoldDir: join(state.dir, "hold"), heavyQueue: { staleMin, helpers: [{ name, ssh }, ...more] } }));
+  writeFileSync(config, JSON.stringify({ stateDir: dir, heavySlots: 1, heavyMaxSlots: 1, heavyHoldDir: join(state.dir, "hold"), guard: { diskFreeCritGb: 0 }, heavyQueue: { staleMin, helpers: [{ name, ssh }, ...more] } }));
   const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== "DORI_STATE_DIR"));
   return Bun.spawn([process.execPath, CLI, "heavy", "t", "--kind", "cpu", "--sync", work, ...(items ? ["--items", items, "--out", join(state.dir, "out")] : []), "--", "true"], { cwd: work, env: { ...env, ...(path ? { PATH: `${path}:${process.env["PATH"]}` } : {}), DORI_CONFIG: config, DORI_ENV_FILE: join(state.dir, "none.env") }, stdout: "ignore", stderr: "pipe", detached: true });
 };
@@ -215,7 +215,7 @@ test("a batch whose item went stale on both helpers, each leaving a child holdin
 test("a batch item whose archive read a file that changed meanwhile (tar exit 1) still runs on the helper", async () => {
   const dir = join(state.dir, "helper");
   mkdirSync(dir);
-  writeFileSync(join(dir, "config.json"), JSON.stringify({ stateDir: join(dir, "state"), heavyHoldDir: join(dir, "hold"), heavyMaxLoad: 1e9, heavyQueue: { exec: true, execMaxMin: 5, jobDir: join(dir, "jobs") } }));
+  writeFileSync(join(dir, "config.json"), JSON.stringify({ stateDir: join(dir, "state"), heavyHoldDir: join(dir, "hold"), guard: { diskFreeCritGb: 0 }, heavyMaxLoad: 1e9, heavyQueue: { exec: true, execMaxMin: 5, jobDir: join(dir, "jobs") } }));
   const helper = ["env", `DORI_CONFIG=${join(dir, "config.json")}`, `DORI_ENV_FILE=${join(dir, "none.env")}`, process.execPath, CLI, "heavy-worker", "--caller", "tester"];
   const bin = tarWith(`/usr/bin/tar "$@"; echo "tar: ${work}/in.txt: file changed as we read it" >&2; exit 1`, "archive");
   const p = caller("h1", helper, 5, bin, [], itemsFile());

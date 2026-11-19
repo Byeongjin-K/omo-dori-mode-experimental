@@ -101,7 +101,7 @@ test("the suite reads a hold directory of its own, never the host's (DORI_HEAVY_
 
 const cli = async (args: string[], heavyQueue: object = {}) => {
   const config = join(state.dir, "config.json");
-  writeFileSync(config, JSON.stringify({ stateDir: join(state.dir, "state"), heavyHoldDir: hold, heavyMaxLoad: 1e9, heavyQueue: { jobDir: join(state.dir, "jobs"), ...heavyQueue } }));
+  writeFileSync(config, JSON.stringify({ stateDir: join(state.dir, "state"), heavyHoldDir: hold, guard: { diskFreeCritGb: 0 }, heavyMaxLoad: 1e9, heavyQueue: { jobDir: join(state.dir, "jobs"), ...heavyQueue } }));
   mkdirSync(join(state.dir, "state"), { recursive: true });
   const own = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("DORI_")));
   const p = Bun.spawn([process.execPath, CLI, "heavy", ...args], { cwd: state.dir, env: { ...own, DORI_CONFIG: config, DORI_ENV_FILE: join(state.dir, "none.env"), DORI_STATE_DIR: join(state.dir, "state") }, stdout: "pipe", stderr: "pipe" });

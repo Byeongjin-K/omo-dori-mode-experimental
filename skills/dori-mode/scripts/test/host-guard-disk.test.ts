@@ -91,9 +91,12 @@ test("the largest folders come with their account and size, biggest first, and w
   const me = userInfo().username;
   // When
   const line = await diskTops(run, [a, b, join(state.dir, "gone")]);
+  const one = await diskTops(run, [a, b, join(state.dir, "gone")], 1);
   chmodSync(join(b, "locked", "inner"), 0o700);
   // Then
   expect(line).toStartWith(`largest under ${a} ${b} ${join(state.dir, "gone")}: ${join(a, "big")} (${me}) 3M, `);
   expect(line.indexOf(join(a, "big"))).toBeLessThan(line.indexOf(join(a, "small")));
-  expect(line).toContain(`못 읽음: ${join(b, "locked")} (일부만 셈), ${join(state.dir, "gone")} (ENOENT)`);
+  expect(line).toEndWith(`; 못 읽음 2곳: ${join(state.dir, "gone")} (ENOENT), ${join(b, "locked")} (일부만 셈)`);
+  // past n examples only the count grows
+  expect(one).toEndWith(`; 못 읽음 2곳: ${join(state.dir, "gone")} (ENOENT), ...`);
 });
