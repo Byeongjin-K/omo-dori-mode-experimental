@@ -5,6 +5,7 @@ import type { DoriConfig, GuardThresholds } from "./config.ts";
 import { parseMeminfo } from "./heavy-mem.ts";
 import { listPanes } from "./panes.ts";
 import type { Runner } from "./run.ts";
+import { type HcGuardDeps, type HcStuck, hcPass } from "./host-guard-hc.ts";
 
 export type HostSample = {
   readonly load1: number;
@@ -139,8 +140,8 @@ export const outsideLines = (procs: readonly HeavyProc[], seen: Set<number>, ali
 // kinds: every reason kind (its first word: load, memory, disk, session, panes) seen since the alert began, so a reason
 // that comes and goes during one alert is printed once; told: this alert's row is owed to the lead (in the
 // inbox or in pending); pending: rows not written yet (the inbox write failed), in order, tried again each pass; unsaved:
-// the last write of statePath failed, so it is written again next pass
-export type GuardState = { alerting: boolean; computeReady?: boolean; kinds?: readonly string[]; told?: boolean; pending?: readonly string[]; unsaved?: boolean };
+// the last write of statePath failed, so it is written again next pass; hc: the hc cores seen stuck, by name (host-guard-hc.ts)
+export type GuardState = { alerting: boolean; computeReady?: boolean; kinds?: readonly string[]; told?: boolean; pending?: readonly string[]; unsaved?: boolean; hc?: Record<string, HcStuck> };
 
 export const guardTick = (s: HostSample, t: GuardThresholds, state: GuardState): string[] => {
   const out: string[] = [];
@@ -172,6 +173,8 @@ export type GuardDeps = {
   readonly tops: () => Promise<string>;
   // one row in the lead's inbox (makeDirectiveDeps leadInbox, the way backlog and the directive audit tell the lead)
   readonly inbox: (kind: string, id: string, content: string) => void;
+  // the hc cores to check (unset: none, as on a herdr or aoe host)
+  readonly hc?: HcGuardDeps;
 };
 
 export const guardStatePath = (stateDir: string): string => join(stateDir, "guard.json");
@@ -180,7 +183,7 @@ export const readGuardState = (path: string): GuardState => {
   try {
     const s = JSON.parse(readFileSync(path, "utf8")) as GuardState;
     const pending = Array.isArray(s.pending) ? s.pending.filter((p): p is string => typeof p === "string") : [];
-    return { alerting: s.alerting === true, kinds: Array.isArray(s.kinds) ? s.kinds : [], told: s.told === true, ...(pending.length ? { pending } : {}) };
+    return { alerting: s.alerting === true, kinds: Array.isArray(s.kinds) ? s.kinds : [], told: s.told === true, ...(pending.length ? { pending } : {}), ...(typeof s.hc === "object" && s.hc !== null && Object.keys(s.hc).length ? { hc: s.hc } : {}) };
   } catch {
     return { alerting: false };
   }
@@ -192,9 +195,9 @@ export const readGuardState = (path: string): GuardState => {
 // is never dropped for the CLEAR after it) and are tried again next pass, as is a state file that could not be written.
 export const guardPass = async (s: HostSample, t: GuardThresholds, state: GuardState, deps: GuardDeps): Promise<string[]> => {
   // what another guard process told is in the file: read it, unless this process's own last write of it failed
-  if (!state.unsaved) Object.assign(state, { pending: undefined }, readGuardState(deps.statePath));
+  if (!state.unsaved) Object.assign(state, { pending: undefined, hc: undefined }, readGuardState(deps.statePath));
   const before = new Set(state.alerting ? state.kinds : []);
-  const saved = (): string => JSON.stringify({ alerting: state.alerting, kinds: state.kinds, told: state.told, ...(state.pending?.length ? { pending: state.pending } : {}) });
+  const saved = (): string => JSON.stringify({ alerting: state.alerting, kinds: state.kinds, told: state.told, ...(state.pending?.length ? { pending: state.pending } : {}), ...(state.hc && Object.keys(state.hc).length ? { hc: state.hc } : {}) });
   const was = saved();
   const queue = [...(state.pending ?? [])];
   const out: string[] = [];
@@ -213,9 +216,14 @@ export const guardPass = async (s: HostSample, t: GuardThresholds, state: GuardS
       state.told = false;
     } else out.push(line);
   }
-  while (queue.length) {
+  for (const { line, wake } of deps.hc ? await hcPass(deps.hc, state, alertReasons(s, t).find((r) => r.startsWith("disk "))) : []) {
+    out.push(line);
+    if (wake) queue.push(line);
+  }
+  // a pass may owe several rows (an hc restart and its CLEAR), so each after the first gets its own id
+  for (let n = 0; queue.length; n++) {
     try {
-      deps.inbox("host-guard", `host-guard-${new Date(deps.now()).toISOString()}`, queue[0] ?? "");
+      deps.inbox("host-guard", `host-guard-${new Date(deps.now()).toISOString()}${n ? `-${n}` : ""}`, queue[0] ?? "");
       queue.shift();
     } catch (e) {
       out.push(`HOST_GUARD WAKE_FAIL the lead's inbox row was not written (${e instanceof Error ? e.message : String(e)}); ${queue.length} row(s) tried again next pass`);

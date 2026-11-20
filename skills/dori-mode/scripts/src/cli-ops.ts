@@ -23,7 +23,7 @@ import { Reports } from "./reports.ts";
 import { Worklog } from "./worklog.ts";
 import { Slack } from "./messenger/slack.ts";
 import { fetchHttp } from "./messenger/http.ts";
-import { hcCoreRunning, realClock, run, runtimesOf } from "./run.ts";
+import { doriCore, hcCoreRunning, realClock, run, runtimesOf } from "./run.ts";
 import { canLaunch } from "./routing.ts";
 import { computeScorecard, dayWindow, formatScorecard, saveScorecard } from "./scorecard.ts";
 import { eyesOff } from "./messenger/discord-listener.ts";
@@ -141,7 +141,10 @@ const guardCommand: Command = async (context) => {
   const state = readGuardState(statePath);
   const outside = new Set<number>();
   const { leadInbox } = makeDirectiveDeps(context);
-  const deps = { statePath, now: () => Date.now(), tops: () => diskTops(run), inbox: leadInbox };
+  // this Dori's own core, and the default core beside it when that is another one (the doriterm host's bridges live there)
+  const own = doriCore() ?? "default";
+  const hc = { cores: [{ name: own, own: true }, ...(own === "default" ? [] : [{ name: "default", own: false }])], up: (core: string) => hcCoreRunning(core), run };
+  const deps = { statePath, now: () => Date.now(), tops: () => diskTops(run), inbox: leadInbox, hc };
   const minutes = loopMinutes();
   console.log("HOST_GUARD_READY");
   await every(minutes, async () => {
