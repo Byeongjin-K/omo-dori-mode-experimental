@@ -115,11 +115,8 @@ export const gatewayLead =
     write(`${formatGatewayInbound(session, inbound)}\n`);
 
 export const inboundGateway = async (cli: Cli): Promise<void> => {
-  cli.onlyOptions("inbound gateway", ["session", "session-file"], 1);
-  const id = cli.opt("session") || process.env["PI_SESSION_ID"] || die("inbound gateway needs --session or PI_SESSION_ID");
-  // the session file is announced with the id (upstream #256, sisyphuslabs/dori-superagent#256)
-  const path = cli.opt("session-file") || process.env["PI_SESSION_FILE"] || die("inbound gateway needs --session-file or PI_SESSION_FILE");
-  if (!path.startsWith("/")) die("--session-file must be an absolute path");
+  cli.onlyOptions("inbound gateway", ["session"], 1);
+  const sessionId = cli.opt("session") || process.env["PI_SESSION_ID"] || die("inbound gateway needs --session or PI_SESSION_ID");
   console.log("INBOUND_READY gateway");
-  await gateway(cli).subscribe({ id, path }, gatewayLead());
+  await gateway(cli).subscribe(sessionId, gatewayLead());
 };

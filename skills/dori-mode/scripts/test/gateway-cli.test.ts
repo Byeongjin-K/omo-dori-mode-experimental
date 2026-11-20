@@ -72,7 +72,7 @@ test("inbound gateway whose stdout refuses the line acks nothing, so the gateway
     // When the monitor's stdout refuses every write (/dev/full, as a pipe whose reader is gone does; a closed fd 1 is
     // reopened on /dev/null by bun, where no writer can tell).
     const env = viaEnvFile(["env", `DORI_CONFIG=${join(dir, "missing.json")}`, `DORI_STATE_DIR=${join(dir, "state")}`, `DORI_ENV_FILE=${join(dir, "missing.env")}`, `DORI_GATEWAY_SOCKET=${path}`]);
-    const result = await run(["sh", "-c", 'exec "$@" > /dev/full', "sh", ...env, "bun", join(import.meta.dir, "../src/cli.ts"), "inbound", "gateway", "--session", "lead-1", "--session-file", "/sessions/lead-1.jsonl"]);
+    const result = await run(["sh", "-c", 'exec "$@" > /dev/full', "sh", ...env, "bun", join(import.meta.dir, "../src/cli.ts"), "inbound", "gateway", "--session", "lead-1"]);
     // Then it fails, and no ack went out for the message nobody saw.
     expect(result.code).not.toBe(0);
     expect(frames.filter((f) => f["op"] === "ack")).toEqual([]);

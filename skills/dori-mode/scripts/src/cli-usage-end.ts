@@ -25,10 +25,8 @@ export const USAGE_END = `                                       --text-file pos
                                        DORI_TELEGRAM_GROUP_ID, DORI_TELEGRAM_TOPIC_ID), owner-gated getUpdates; his
                                        edits as edit:dm / edit:topic, mid=<message_id> on every line, live-location
                                        refreshes dropped, media with file=<kind>:<file_id>
-  inbound gateway [--session ID] [--session-file PATH]
-                                       the dori.bot surface: subscribe as the lead session (default PI_SESSION_ID,
-                                       PI_SESSION_FILE) on the gateway's local socket; print INBOUND gateway lines,
-                                       ack each after printing
+  inbound gateway [--session ID]       the dori.bot surface: subscribe as the lead session (default PI_SESSION_ID) on the
+                                       gateway's local socket; print INBOUND gateway lines, ack each after printing
   inbound discord                      long-running gateway listener: the owner's messages get an eyes reaction and an
                                        inbox row, voice is transcribed, question-card answers are recorded; with
                                        DORI_DISCORD_WATCH_CHANNELS + DORI_DISCORD_WATCH_BOTS a monitoring bot's problem
