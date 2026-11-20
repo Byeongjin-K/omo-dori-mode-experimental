@@ -11,11 +11,15 @@ export type HcGuardDeps = { readonly cores: readonly HcCore[]; readonly up: (cor
 export type HcStuck = { passes: number; restarted?: boolean; waited?: boolean };
 const STOPPED = "registry writer stopped";
 
-// HC_SESSION for one hc call: the default core is the one with none
-const coreEnv = (core: string) => ({ HC_SESSION: core === "default" ? undefined : core });
-const hcStuckNow = async (hc: HcGuardDeps, core: string): Promise<boolean> => {
+// HC_SESSION for one hc call (the default core is the one with none), and never an inherited HC_SOCKET, which outranks it
+// in hc and would point the call at another core (review 1 of #514)
+const coreEnv = (core: string) => ({ HC_SESSION: core === "default" ? undefined : core, HC_SOCKET: undefined });
+// ok: hc ls answered; stuck: the stopped-writer error; unknown: any other failure (a timeout, a core going down), which
+// neither starts nor ends an episode (review 1 of #514)
+type Probe = "ok" | "stuck" | "unknown";
+const probe = async (hc: HcGuardDeps, core: string): Promise<Probe> => {
   const ls = await hc.run(["hc", "--json", "ls"], { env: coreEnv(core), timeoutMs: 20_000 });
-  return ls.code !== 0 && `${ls.err}\n${ls.out}`.includes(STOPPED);
+  return ls.code === 0 ? "ok" : `${ls.err}\n${ls.out}`.includes(STOPPED) ? "stuck" : "unknown";
 };
 
 // The lines of one hc pass, wake: the lead's inbox gets it too. A core is asked only while its socket answers, since any
@@ -27,7 +31,9 @@ export const hcPass = async (hc: HcGuardDeps, state: { hc?: Record<string, HcStu
   for (const { name, own } of hc.cores) {
     if (!(await hc.up(name))) continue;
     const was = seen[name];
-    if (!(await hcStuckNow(hc, name))) {
+    const p = await probe(hc, name);
+    if (p === "unknown") continue;
+    if (p === "ok") {
       if (was) out.push({ line: `HOST_GUARD HC_CLEAR ${name}: hc ls answers again`, wake: true });
       delete seen[name];
       continue;
@@ -47,11 +53,12 @@ export const hcPass = async (hc: HcGuardDeps, state: { hc?: Record<string, HcStu
     }
     now.restarted = true;
     const r = await hc.run(["hc", "--json", "server", "restart"], { env: coreEnv(name), timeoutMs: 60_000 });
-    if (r.code === 0 && !(await hcStuckNow(hc, name))) {
+    const after = r.code === 0 ? await probe(hc, name) : "unknown";
+    if (after === "ok") {
       out.push({ line: `HOST_GUARD HC_RESTART ${name} ok: hc server restart, programs kept`, wake: true }, { line: `HOST_GUARD HC_CLEAR ${name}: hc ls answers again`, wake: true });
       delete seen[name];
     } else {
-      const why = r.code === 0 ? "hc ls still fails after hc server restart" : `hc server restart failed (${r.code}): ${(r.err || r.out).trim().slice(0, 160)}`;
+      const why = r.code !== 0 ? `hc server restart failed (${r.code}): ${(r.err || r.out).trim().slice(0, 160)}` : after === "stuck" ? "hc ls still fails after hc server restart" : "hc ls did not answer after hc server restart";
       out.push({ line: `HOST_GUARD HC_RESTART ${name} failed: ${why}; not tried again until it clears`, wake: true });
     }
   }
