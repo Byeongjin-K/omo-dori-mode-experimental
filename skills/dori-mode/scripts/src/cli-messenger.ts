@@ -17,7 +17,6 @@ import { makeHandoverDeps } from "./cli-deps-handover.ts";
 import { makeDiscordDeps } from "./cli-deps-discord.ts";
 import { pairTextWarnings } from "./pair-text-warning.ts";
 import { textWarning } from "./owner-text-warning.ts";
-import { sendGateway } from "./cli-gateway.ts";
 import { updateNoticeProblem } from "./update-notice-warning.ts";
 
 const sendCommand: Command = async (context) => {
@@ -25,9 +24,7 @@ const sendCommand: Command = async (context) => {
   const { quietGuard } = makeHandoverDeps(context);
   const { checkedDiscordToken, discordApi, ownerSpeech, ownerPlace, notePost, withFileNames } = makeDiscordDeps(context);
   await quietGuard();
-  const platform = key ?? die("send needs slack, telegram, discord or gateway");
-  // the dori.bot surface over the gateway's local socket (upstream #255, https://github.com/sisyphuslabs/dori-superagent/pull/255)
-  if (platform === "gateway") return await sendGateway(context);
+  const platform = key ?? die("send needs slack, telegram or discord");
   onlyOptions("send", ["to", "text", "text-file", "thread", "edit", "status", "no-typing", "ping", "reply", "again", "file"], 1);
   const to = need("to");
   const status = opt("status");

@@ -17,8 +17,6 @@ import { diskTops, guardPass, guardStatePath, outsideLines, readGuardState, samp
 import { areaLabel, type AreaQuery, areaSignals, formatSignals } from "./lane-signals.ts";
 import { statusOf } from "./registry.ts";
 import { bootCheck, envSlackCheck } from "./boot.ts";
-import { gatewayCheck } from "./boot-gateway.ts";
-import { Gateway, gatewaySocketPath, unixConnector } from "./messenger/gateway.ts";
 import { Reports } from "./reports.ts";
 import { Worklog } from "./worklog.ts";
 import { Slack } from "./messenger/slack.ts";
@@ -61,7 +59,6 @@ const updateCommand: Command = async (context) => {
 const bootCommand: Command = async (context) => {
   const { deps } = context;
   const sessionDirs = [process.env["PI_SESSION_DIR"], process.env["PI_SESSION_FILE"] && dirname(process.env["PI_SESSION_FILE"])];
-  const socket = gatewaySocketPath(deps.config.gateway.socket);
   const result = await bootCheck({
     ...deps,
     reports: new Reports(deps.config.stateDir),
@@ -70,8 +67,6 @@ const bootCommand: Command = async (context) => {
     hcCoreUp: () => hcCoreRunning(),
     // a bad token file is a failed boot line, not an exit: boot is the read-only report a fresh lead depends on (#201)
     slack: envSlackCheck((token) => new Slack(fetchHttp, realClock, { token, cookie: process.env["DORI_SLACK_COOKIE"] }, process.env["DORI_SLACK_API"]?.trim() || undefined)),
-    // no socket file is not a Dori VM: the dori.bot surface is skipped, as Slack is with no token (upstream #255)
-    gateway: gatewayCheck(new Gateway(unixConnector, realClock, socket), socket),
     monitorDirs: sessionDirs.flatMap((dir) => (dir ? [join(dir, "extensions", "terminal")] : [])),
   });
   for (const line of result.lines) console.log(line);

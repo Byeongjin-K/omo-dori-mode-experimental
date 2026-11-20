@@ -6,7 +6,6 @@ import { aoeRefForLane, listAoeSessions, listSessions, probeAoeSession, RuntimeD
 import { reconcilePanes } from "./reconcile.ts";
 import { driftCheck, workspaceCheck } from "./boot-checks.ts";
 import type { Slack } from "./messenger/slack.ts";
-import { type GatewayCheck, gatewayBootLines } from "./boot-gateway.ts";
 import { type BootLane, finished, monitorCleanup, readMonitorManifests } from "./boot-monitors.ts";
 import { type Lane, statusOf } from "./registry.ts";
 import { ReportError, type Reports } from "./reports.ts";
@@ -21,8 +20,6 @@ export type BootDeps = Pick<FlowDeps, "run" | "registry" | "config" | "clock"> &
   readonly rts: ChosenRuntimes;
   readonly hcCoreUp: () => Promise<boolean>;
   readonly slack: SlackCheck;
-  /** The dori.bot surface (upstream #255, https://github.com/sisyphuslabs/dori-superagent/pull/255); absent or null (no socket) = skipped. */
-  readonly gateway?: GatewayCheck;
   readonly monitorDirs?: readonly string[];
   readonly slackDeadlineMs?: number;
 };
@@ -149,13 +146,7 @@ export const bootCheck = async (deps: BootDeps): Promise<{ exitCode: number; lin
     lines.push(`STOP in the owner session only: ${item.stop}`);
   }
   for (const item of expired) lines.push(`EXPIRED ${item.lanes.join(",")} match=${item.match.join(",")} ownerSession=${item.sessionId} metadata=${shellQuote(item.metadata)} expiresAt=${new Date(item.expiresAt ?? 0).toISOString()}; nothing to stop`);
-  // the network steps run last, after every local check, and give up at a short deadline
   const deadlineMs = deps.slackDeadlineMs ?? 10_000;
-  if (deps.gateway) {
-    const gateway = await gatewayBootLines(deps.gateway, deadlineMs);
-    if (gateway.failed) failed = true;
-    lines.push(...gateway.lines);
-  }
   const stop = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {

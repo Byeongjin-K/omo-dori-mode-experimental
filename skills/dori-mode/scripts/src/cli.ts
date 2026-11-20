@@ -118,7 +118,7 @@ const options = {
   model: { type: "string" }, cwd: { type: "string" }, pane: { type: "string" }, evidence: { type: "string", multiple: true },
   reason: { type: "string", multiple: true }, note: { type: "string" }, write: { type: "boolean" }, loop: { type: "string" },
   to: { type: "string" }, text: { type: "string" }, edit: { type: "string" }, status: { type: "string" }, "no-typing": { type: "boolean" }, ping: { type: "string" },
-  option: { type: "string", multiple: true }, session: { type: "string" }, "status-id": { type: "string" }, row: { type: "string", multiple: true }, receipt: { type: "string" }, line: { type: "string", multiple: true }, tmux: { type: "string" }, open: { type: "boolean" },
+  option: { type: "string", multiple: true }, session: { type: "string" }, tmux: { type: "string" }, open: { type: "boolean" },
   from: { type: "string" }, first: { type: "string" }, "open-card": { type: "boolean" },
   "done-weak-ok": { type: "boolean" }, tag: { type: "string", multiple: true }, lane: { type: "string" }, metric: { type: "string" }, hypothesis: { type: "string" }, date: { type: "string" }, post: { type: "boolean" },
   pull: { type: "boolean" }, push: { type: "boolean" }, "dry-run": { type: "boolean" }, help: { type: "boolean" }, "use-gpu": { type: "boolean" }, ui: { type: "boolean" },
