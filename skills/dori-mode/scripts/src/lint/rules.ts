@@ -1,6 +1,6 @@
 // Runs the three test-hygiene rules of upstream https://github.com/sisyphuslabs/dori-superagent/pull/250 over one
 // source file. Upstream carries the rules as an oxlint jsPlugin; the fork keeps Biome as its only linter and adds no
-// oxlint, so this walks the same ESTree that oxlint hands a jsPlugin (oxc-parser, the version knip already locks):
+// oxlint, so this walks the same ESTree that oxlint hands a jsPlugin (oxc-parser, the top-level devDependency; knip keeps its own nested copy):
 // every node gets its `parent`, each rule's visitor runs on entry and its `<type>:exit` visitor on leaving, in source
 // order. No disable comment is honoured, so a finding cannot be hidden from the ratchet.
 import { parseSync } from "oxc-parser";
