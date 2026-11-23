@@ -2472,6 +2472,29 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.request(path=tasks, data={"title": "B"}))[0], 202)
         self.assertEqual(len(self.batch_card_posts()), 2)
 
+    async def test_a_write_refused_past_the_limit_replaces_no_card_and_a_revision_still_replaces_its_own(self):
+        # Given: past the limit, a waiting limit card (task A) and a card with its own reason (an outside invite).
+        self.approval()
+        self.config["limits"] = {"writes_per_owner_message": 1}
+        tasks = "/tasks.googleapis.com/tasks/v1/lists/l/tasks"
+        self.assertEqual((await self.request(path=tasks, data={"title": "0"}))[0], 200)
+        self.assertEqual((await self.request(path=tasks, data={"title": "A"}))[0], 202)
+        self.assertEqual((await self.request(data={"summary": "Invite", "attendees": [{"email": "outside@example.net"}]}))[0], 202)
+        task, invite = self.service.pending()
+        # When: the same invite comes again without the outside guest, so only the limit holds it.
+        status, body = await self.request(data={"summary": "Invite"})
+        # Then: it is refused, and the invite card it would have replaced still waits untouched.
+        self.assertEqual((status, json.loads(body)["error"]), (403, "owner-message-limit-card-waiting"))
+        self.assertEqual([e["id"] for e in self.service.pending()], [task["id"], invite["id"]])
+        self.assertTrue(self.cards[invite["message"]].startswith("승인 필요"))
+        # When: a revised version of the waiting task comes in.
+        self.assertEqual((await self.request(path=tasks, data={"title": "A", "notes": "고친 판"}))[0], 202)
+        # Then: it replaces that card, and one limit card still waits.
+        self.assertTrue(self.cards[task["message"]].startswith("🔁 새 판으로 대체됨"))
+        limit_cards = [e for e in self.service.pending() if e["reason"] == "owner-message-write-limit"]
+        self.assertEqual([json.loads(base64.b64decode(e["body"]))["notes"] for e in limit_cards], ["고친 판"])
+        self.assertEqual(len(self.batch_card_posts()), 3)
+
     async def order_request(self, order="17", **kwargs):
         return await self.request(proof=False, headers={"x-dori-owner-order": order, **kwargs.pop("headers", {})},
                                   **kwargs)

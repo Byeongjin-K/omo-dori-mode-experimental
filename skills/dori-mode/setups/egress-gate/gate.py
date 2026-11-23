@@ -2609,15 +2609,19 @@ class Gate:
                     if entry.get("status") == "pending" and all(entry.get(k) == v for k, v in sent.items()):
                         return 202, {}, json_bytes(dict(status="pending_approval", id=entry["id"], card=entry["card"],
                                                         reason=entry["reason"]))
-            thread = await self.card_thread(channel, proof, f"{CARD_KIND.get(api, api)} · {(title or op)[:40]}")
-            await self.supersede(thread, api, op, path, method, title, body)
-            if reason == "owner-message-write-limit":
-                # Past the limit one owner message has one card waiting at a time (a newer version of the same work
-                # replaced it just above); more writes wait for its decision or a new owner message.
+                # Past the limit one owner message has one card waiting at a time; more writes wait for its decision
+                # or a new owner message. Decided before anything changes, so a refused write replaces no card; only
+                # a newer version of the waiting card's own work goes on, to replace it below (supersede).
                 waiting = next((entry for entry in self.pending() if entry.get("owner_message") == proof
                                 and entry.get("status") == "pending" and entry.get("reason") == reason), None)
                 if waiting:
-                    raise Refused("owner-message-limit-card-waiting", extra=dict(card=waiting["card"], id=waiting["id"]))
+                    base = f"/channels/{waiting['channel']}/messages/{waiting['message']}"
+                    if (waiting.get("thread") == channel
+                            or not self.replaces(waiting, waiting.get("thread"), api, op, path, method, title, grantee(body))
+                            or await self.owner_reacted(base, "⛔") or await self.owner_reacted(base, "✅")):
+                        raise Refused("owner-message-limit-card-waiting", extra=dict(card=waiting["card"], id=waiting["id"]))
+            thread = await self.card_thread(channel, proof, f"{CARD_KIND.get(api, api)} · {(title or op)[:40]}")
+            await self.supersede(thread, api, op, path, method, title, body)
             # Owner 2026-10-19 00:00 KST: the card shows who, what and the reactions; the reason,
             # the owner-message link and the expiry stay in the pending record.
             content = (f"승인 필요 · {CARD_KIND.get(api, api)}\n"
@@ -2735,11 +2739,7 @@ class Gate:
         The caller holds approval_lock."""
         incoming = grantee(body)  # read once: the loop below reuses `body` for the Discord replies
         for entry in self.pending():
-            if (entry.get("thread") != thread or entry.get("api") != api or entry.get("op") != op
-                    or entry.get("path") != path or entry.get("status") != "pending"
-                    or method == "POST" and entry.get("title") != title
-                    or method == "POST" and path.endswith(("/permissions", "/acl"))
-                    and grantee(base64.b64decode(entry.get("body") or "")) != incoming):
+            if not self.replaces(entry, thread, api, op, path, method, title, incoming):
                 continue
             base = f"/channels/{entry['channel']}/messages/{entry['message']}"
             if await self.owner_reacted(base, "⛔") or await self.owner_reacted(base, "✅"):
@@ -2751,6 +2751,16 @@ class Gate:
             await self.bot_call("PATCH", base, {
                 "content": ("🔁 새 판으로 대체됨 — 이 카드는 실행되지 않습니다\n" + original)[:2000],
                 "allowed_mentions": {"parse": []}})
+
+    @staticmethod
+    def replaces(entry, thread, api, op, path, method, title, incoming) -> bool:
+        """Whether a newer card for this work in `thread` replaces the undecided card `entry` (supersede); `incoming`
+        is the newer request's grantee."""
+        return not (entry.get("thread") != thread or entry.get("api") != api or entry.get("op") != op
+                    or entry.get("path") != path or entry.get("status") != "pending"
+                    or method == "POST" and entry.get("title") != title
+                    or method == "POST" and path.endswith(("/permissions", "/acl"))
+                    and grantee(base64.b64decode(entry.get("body") or "")) != incoming)
 
     async def owner_reacted(self, base, emoji) -> bool:
         after = None
