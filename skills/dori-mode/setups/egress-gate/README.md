@@ -514,10 +514,14 @@ is in the attachment). At most five job lines, then `- 외 N묶음 M건`. Titles
 failed/refused/pending counts, one line per group of waiting cards (same owner message, kind and
 reason: `- 승인 기다림 드라이브 추가 40건 · 근거 글당 쓰기 한도 · 근거 글 <#thread> HH:MM`) and
 per waiting batch card, at most three, and `자세한 목록은 첨부 파일`. Lines drop (into the overflow
-counts) until the message fits under 1900 characters. The attachment lists every write by job (time,
+counts) until the message is at most 1900 characters. The attachment lists every write by job (time,
 verb, title, success or HTTP status, link or id, approving card, `되살리기 POST /_gate/restore/<id>`,
-folder ids, the owner message link), every refused write (method, path, reason) and every waiting
-card with its link; it never carries request bodies, headers or tokens. Drive creates and copies are
+folder ids, the owner message link), every refused write (method, reason, and the path for a Google or
+Discord API request; only the host for any other service, whose path can be a capability) and every
+waiting card with its link, a waiting batch card item by item (kind, names, refs, state). It never
+carries request bodies or headers, and the gate's bot token plus token-shaped strings (Discord bot,
+Google access/refresh, Slack, GitHub) are masked as `[가림]` in the post and the attachment. Cards
+merged into a batch card are not counted as waiting. Drive creates and copies are
 journaled with the request's file `name` when Google's answer has none (a Dori asking `fields=id`) and
 `folders: [{id, name}]` for their parents. Optional config `"dori_name"` names the Dori in the head
 line and the attachment title.

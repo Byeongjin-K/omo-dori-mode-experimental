@@ -16,6 +16,18 @@ def defang(text: str) -> str:
     return re.sub(r"(?i)\b(h)tt(ps?)://", r"\1xx\2[:]//", text)
 
 
+# Credential shapes a title or path could carry (Discord bot, Google access/refresh, Slack, GitHub tokens).
+SECRET = re.compile(r"[\w-]{23,28}\.[\w-]{6}\.[\w-]{27,}|ya29\.[\w.-]+|1//[\w-]{20,}|xox[abprs]-[\w-]+|gh[pousr]_\w{20,}")
+
+
+def redact(text: str, *known: str) -> str:
+    """The post and its attachment are read by people: never a credential, the gate's own bot token first."""
+    for secret in known:
+        if secret:
+            text = text.replace(secret, "[가림]")
+    return SECRET.sub("[가림]", text)
+
+
 def window_records(path: Path, cutoff: dt.datetime) -> list:
     if not path.exists():
         return []
@@ -129,10 +141,10 @@ def jobs(rows: list, key=job_key) -> list:
 def where(rows: list, batch_titles: dict) -> str:
     first = rows[0]
     if first.get("batch"):
-        return f"묶음 「{short(batch_titles.get(first['batch']) or first['batch'], 24)}」"
+        return f"묶음 「{defang(short(batch_titles.get(first['batch']) or first['batch'], 24))}」"
     names = [folder.get("name") or folder.get("id", "") for folder in first.get("folders") or []
              if isinstance(folder, dict)]
-    return f"폴더 「{short(', '.join(names), 24)}」" if names else ""
+    return f"폴더 「{defang(short(', '.join(names), 24))}」" if names else ""
 
 
 def titles(rows: list, snapshot_title=None) -> str:
@@ -161,7 +173,7 @@ def wait_line(entries: list, today) -> str:
 
 
 def batch_wait_line(batch: dict, today) -> str:
-    parts = [f"승인 기다림 묶음 「{short(str(batch.get('title') or batch.get('id', '')), 24)}」 "
+    parts = [f"승인 기다림 묶음 「{defang(short(str(batch.get('title') or batch.get('id', '')), 24))}」 "
              f"{len(batch.get('items') or [])}개", source(batch.get("owner_message"), today)]
     return "- " + " · ".join(part for part in parts if part)
 
@@ -218,11 +230,20 @@ def message(*args, **kwargs) -> str:
             waits_shown -= 1
 
 
+def target(row: dict) -> str:
+    """A refused request names its host only, unless it is a Google API path (resource ids) or a Discord API
+    path (safe_path already masks webhook and interaction tokens): other services carry capabilities in the
+    path, and safe_path strips only queries."""
+    path = str(row.get("path", ""))
+    host = path.lstrip("/").split("/", 1)[0]
+    return path if row.get("port") == "discord" or host.endswith(".googleapis.com") else host
+
+
 def stamp(ts: str) -> str:
     return dt.datetime.fromisoformat(ts).astimezone(KST).strftime("%m-%d %H:%M")
 
 
-def change_item(row: dict, snapshot_title=None) -> str:
+def change_item(row: dict, snapshot_title=None, with_folders=False) -> str:
     resource = row.get("resource") or {}
     parts = [f"{stamp(row['ts'])} {verb(row)} {NAMES.get(row['api'], row['api'])} {row['op']}",
              defang(title_of(row, snapshot_title)), "성공" if 200 <= row["status"] < 300 else f"실패 HTTP {row['status']}"]
@@ -230,6 +251,9 @@ def change_item(row: dict, snapshot_title=None) -> str:
         parts.append(resource["link"])
     elif resource.get("id"):
         parts.append("id " + str(resource["id"]))
+    if with_folders:
+        parts += [f"폴더 {defang(str(folder.get('name') or ''))} (id {folder.get('id', '')})"
+                  for folder in row.get("folders") or [] if isinstance(folder, dict)]
     if row.get("approved_by"):
         parts.append("승인 카드 " + str(row["approved_by"]))
     if row.get("restorable") and 200 <= row["status"] < 300:
@@ -253,15 +277,15 @@ def details(changes: list, denials: list, pending: list, hours: float, name: str
             lines.append(f"### {' · '.join(p for p in (what(group), where(group, batch_titles)) if p)}")
             if first.get("batch"):
                 lines.append(f"- 묶음 id {first['batch']}")
-            for folder in first.get("folders") or []:
-                if isinstance(folder, dict):
-                    lines.append(f"- 폴더 {defang(str(folder.get('name') or ''))} (id {folder.get('id', '')})")
+            else:
+                lines += [f"- 폴더 {defang(str(folder.get('name') or ''))} (id {folder.get('id', '')})"
+                          for folder in first.get("folders") or [] if isinstance(folder, dict)]
             lines.append(f"- 근거 글 {first.get('owner_message') or '없음'}")
-            lines += [change_item(row, snapshot_title) for row in group] + [""]
+            lines += [change_item(row, snapshot_title, bool(first.get("batch"))) for row in group] + [""]
     refused = refused_writes(denials)
     if refused:
         lines += [f"## 막힌 쓰기 {len(refused)}건", ""]
-        lines += [f"- {stamp(row['ts'])} {row.get('method', '')} {row.get('path', '')} · "
+        lines += [f"- {stamp(row['ts'])} {row.get('method', '')} {target(row)} · "
                   f"{REASONS.get(row.get('reason', ''), row.get('reason', ''))} ({row.get('reason', '')})"
                   for row in sorted(refused, key=lambda row: row["ts"])] + [""]
     if pending or batches:
@@ -274,7 +298,12 @@ def details(changes: list, denials: list, pending: list, hours: float, name: str
         for batch in batches:
             lines += [f"### 묶음 「{defang(str(batch.get('title') or ''))}」 {len(batch.get('items') or [])}개",
                       f"- 근거 글 {batch.get('owner_message') or '없음'}",
-                      f"- {stamp(batch['ts'])} 카드 {batch.get('card', '')}", ""]
+                      f"- {stamp(batch['ts'])} 카드 {batch.get('card', '')}"]
+            states = batch.get("state") or []
+            lines += [f"- {item.get('kind', '')} " + " · ".join(f"{key} {defang(str(value))}" for key, value in item.items()
+                                                                if key != "kind")
+                      + (f" ({states[index]})" if index < len(states) else "")
+                      for index, item in enumerate(batch.get("items") or []) if isinstance(item, dict)] + [""]
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -297,7 +326,8 @@ def post_summary(config: dict, hours: float) -> int:
     pending = []
     for path in sorted((state / "pending").glob("*.json")):
         row = json.loads(path.read_text())
-        if dt.datetime.fromisoformat(row["ts"]) >= cutoff:
+        # A card merged into a batch card waits on that card, not on its own.
+        if row.get("status", "pending") == "pending" and dt.datetime.fromisoformat(row["ts"]) >= cutoff:
             pending.append(row)
     batch_titles, batches = {}, []
     for path in sorted((state / "batches").glob("*.json")):
@@ -323,7 +353,9 @@ def post_summary(config: dict, hours: float) -> int:
     filename = f"gate-summary-{now.astimezone(KST):%Y-%m-%d}.md"
     base = urlsplit(config.get("discord_api_base", "https://discord.com/api/v10"))
     connection_class = http.client.HTTPSConnection if base.scheme == "https" else http.client.HTTPConnection
-    authorization = "Bot " + Path(config["owner_proof"]["token_file"]).read_text().strip()
+    token = Path(config["owner_proof"]["token_file"]).read_text().strip()
+    authorization = "Bot " + token
+    content, attachment = redact(content, token), redact(attachment, token)
     body, content_type = multipart({"content": content, "allowed_mentions": {"parse": []}, "flags": 4,
                                     "attachments": [{"id": 0, "filename": filename}]}, filename, attachment.encode())
     connection = connection_class(base.hostname, base.port, timeout=30)
@@ -365,9 +397,9 @@ def main() -> None:
         connection.close()
     if not changes:
         return
-    print(message(changes, [], [], args.hours))
+    print(redact(message(changes, [], [], args.hours)))
     print()
-    print(details(changes, [], [], args.hours), end="")
+    print(redact(details(changes, [], [], args.hours)), end="")
 
 
 if __name__ == "__main__":

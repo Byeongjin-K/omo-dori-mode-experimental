@@ -3509,8 +3509,8 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         (message,) = self.cards
         lines = self.cards[message].splitlines()
         self.assertLessEqual(len(lines), 10)
-        self.assertEqual(lines[1], "- 드라이브 추가 30건 · 폴더 「Survey」 · p000.las 외 29건 · 근거 글 <#77> "
-                         + summary.source(proof).rsplit(" ", 1)[-1])
+        # The owner message's time carries its date once the day has turned (source() decides both sides).
+        self.assertEqual(lines[1], "- 드라이브 추가 30건 · 폴더 「Survey」 · p000.las 외 29건 · " + summary.source(proof))
         self.assertIn("막힌 쓰기 2건 · 승인 기다림 40건", lines)
         self.assertTrue(lines[-2].startswith("- 승인 기다림 드라이브 추가 40건 · 근거 글당 쓰기 한도 · 근거 글 <#77>"))
         self.assertNotIn("file07", self.cards[message])
@@ -3523,6 +3523,39 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("- 폴더 Survey (id fold1)", attachment)
         self.assertIn("근거 글 " + proof, attachment)
         self.assertEqual(output.getvalue().split()[:3], ["SUMMARY_POSTED", "1", "message"])
+
+    async def test_summary_never_posts_a_credential_from_a_title_or_a_refused_path(self):
+        # Given: a refused request whose path is another service's capability, and titles carrying credentials.
+        self.approval()
+        token = Path(self.config["owner_proof"]["token_file"]).read_text().strip()
+        status, _ = await self.request(path="/hooks.slack.com/services/T000/B000/QA_CAPABILITY_ONLY",
+                                       data={"text": "QA_BODY_ONLY"})
+        self.assertEqual(status, 403)
+        await self.request(data={"summary": "bot " + token})
+        await self.request(data={"summary": "google ya29.QA_ACCESS_TOKEN"})
+        with contextlib.redirect_stdout(io.StringIO()):
+            await asyncio.to_thread(summary.post_summary, self.config, 24)
+        (message,) = self.attachments
+        (attachment,) = self.attachments[message].values()
+        # Then: the refusal names its host, and every credential is masked in the post and the attachment.
+        self.assertIn("POST hooks.slack.com", attachment)
+        for text in (self.cards[message], attachment):
+            for secret in (token, "QA_CAPABILITY_ONLY", "QA_BODY_ONLY", "ya29.QA_ACCESS_TOKEN"):
+                self.assertNotIn(secret, text)
+        self.assertIn("bot [가림]", attachment)
+
+    async def test_summary_attachment_lists_a_waiting_batch_card_item_by_item(self):
+        self.approval()
+        status, _ = await self.submit_batch(title="Gate QA")
+        self.assertEqual(status, 202)
+        with contextlib.redirect_stdout(io.StringIO()):
+            await asyncio.to_thread(summary.post_summary, self.config, 24)
+        (message,) = self.attachments  # the batch card is a post too; the summary is the one with a file
+        self.assertIn("- 승인 기다림 묶음 「Gate QA」 3개", self.cards[message])
+        (attachment,) = self.attachments[message].values()
+        for item in ("- folder ref f1 · name 짱돌 · parent root1", "- upload name a.md · parent_ref f1",
+                     "- move file m1 · from old1 · to_ref f1"):
+            self.assertIn(item, attachment)
 
     async def test_summary_of_hundreds_of_jobs_stays_one_post_under_the_limit(self):
         self.approval()
