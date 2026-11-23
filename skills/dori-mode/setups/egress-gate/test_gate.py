@@ -110,6 +110,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         self.state = Path(self.temporary.name)
         self.seen = []
         self.cards = {}
+        self.attachments = {}
         self.card_channels = {}
         self.reactions = {}
         self.threads = {"555"}
@@ -346,7 +347,16 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
                     if parts[2] in self.thread_meta and "thread_metadata" in self.thread_meta[parts[2]]:
                         self.thread_meta[parts[2]]["thread_metadata"]["archived"] = False  # Discord reopens
                     message = str(1000 + len(self.cards))
-                    self.cards[message] = json.loads(body).get("content", "") if body.startswith(b"{") else ""
+                    if headers.get("content-type", "").startswith("multipart/form-data"):
+                        form = email.parser.BytesParser(policy=email.policy.default).parsebytes(
+                            b"Content-Type: " + headers["content-type"].encode() + b"\r\nMIME-Version: 1.0\r\n\r\n" + body)
+                        fields = {part.get_param("name", header="content-disposition"): part for part in form.iter_parts()}
+                        self.cards[message] = json.loads(fields["payload_json"].get_payload(decode=True)).get("content", "")
+                        self.attachments[message] = {
+                            part.get_filename(): (part.get_payload(decode=True) or b"").decode("utf-8", "replace")
+                            for key, part in fields.items() if key.startswith("files[")}
+                    else:
+                        self.cards[message] = json.loads(body).get("content", "") if body.startswith(b"{") else ""
                     self.card_channels[message] = parts[2]
                     data = {"id": message, "content": self.cards[message]}
                 elif parts[1] == "channels" and len(parts) == 3:
@@ -395,6 +405,8 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
                 data = {"id": "new", title_key: "Changed", "htmlLink": "https://example.invalid/resource"}
                 if body and headers.get("content-type", "").startswith("application/json"):
                     data.update(json.loads(body))
+                if moved.get("fields") == ["id"]:
+                    data = {"id": data["id"]}  # Google answers with the asked fields only
             await gate.reply(writer, status, gate.json_bytes(data))
         finally:
             writer.close()
@@ -3362,9 +3374,10 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         text = "\n".join(self.cards.values())
         self.assertIn("Daily title", text)
         self.assertNotIn("https://discord.com/channels/10/20/100", text)
-        self.assertEqual(text.splitlines()[-1], "자세한 건 물어보면 올림")
-        journal = (self.state / "changes.jsonl").read_text()
-        self.assertIn("https://discord.com/channels/10/20/100", journal)
+        self.assertIn("근거 글 <#20>", text)
+        self.assertEqual(text.splitlines()[-1], "자세한 목록은 첨부 파일")
+        (attachment,) = [text for files in self.attachments.values() for text in files.values()]
+        self.assertIn("근거 글 https://discord.com/channels/10/20/100", attachment)
         self.assertTrue(output.getvalue().startswith("SUMMARY_POSTED"))
         self.assertTrue(all(len(c) < 1900 for c in self.cards.values()))
 
@@ -3418,6 +3431,11 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("막힌 쓰기 1건 · 승인 기다림 1건", content)
         self.assertNotIn("/_gate/restore/", content)
         self.assertNotIn(self.service.pending()[0]["card"], content)
+        # The post leaves them out; the attachment keeps them.
+        (attachment,) = [text for files in self.attachments.values() for text in files.values()]
+        self.assertIn("되살리기 POST /_gate/restore/", attachment)
+        self.assertIn(self.service.pending()[0]["card"], attachment)
+        self.assertIn("owner-message-required", attachment)
         self.assertTrue(json.loads((self.state / "changes.jsonl").read_text().splitlines()[0])["restorable"])
 
     def test_summary_groups_gate_tests_and_names_deletes_from_snapshots(self):
@@ -3431,9 +3449,8 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
                    row("events.insert", "Broken", 500)]
         text = summary.render(changes, [], [], 24, "유돌", lambda r: "게이트 시험")
         self.assertEqual(text.splitlines(), [
-            "오늘 유돌이 바꾼 것 4건", "일정 2(추가 1·수정 1)",
-            now.astimezone(dt.timezone(dt.timedelta(hours=9))).strftime("%H:%M Dentist · %H:%M Dinner"),
-            "게이트 시험 2건(일정 2)", "되살릴 수 있음 1건", "실패 1건", "자세한 건 유돌에게 물어보면 올림"])
+            "오늘 유돌이 바꾼 것 4건", "- 일정 추가 1건·수정 1건 · Dentist·Dinner · 근거 글 <#2> 01-01 09:00",
+            "게이트 시험 2건(일정 2)", "되살릴 수 있음 1건", "실패 1건", "자세한 목록은 첨부 파일"])
 
     def test_summary_counts_only_refused_writes(self):
         now = dt.datetime.now(dt.timezone.utc).isoformat()
@@ -3448,7 +3465,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
                    denial("google", "PATCH", "/www.googleapis.com/drive/v3/files/f", "owner-message-required"),
                    denial("discord", "POST", "/api/v10/channels/9/messages", "foreign-channel")]
         self.assertEqual(summary.render([], denials, [], 24, "유돌").splitlines(),
-                         ["오늘 유돌이 바꾼 것 0건", "막힌 쓰기 2건", "자세한 건 유돌에게 물어보면 올림"])
+                         ["오늘 유돌이 바꾼 것 0건", "막힌 쓰기 2건", "자세한 목록은 첨부 파일"])
         self.assertEqual(len(summary.refused_writes(denials[:5])), 0)
 
     async def test_summary_without_refused_writes_posts_nothing(self):
@@ -3459,6 +3476,79 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.to_thread(summary.post_summary, self.config, 24)
         self.assertEqual(output.getvalue().strip(), "SUMMARY_EMPTY")
         self.assertEqual(self.cards, {})
+
+    def write_day(self, changes, pending=(), denials=()):
+        for name, rows in (("changes.jsonl", changes), ("denials.jsonl", denials)):
+            (self.state / name).write_text("".join(json.dumps(row) + "\n" for row in rows))
+        for entry in pending:
+            (self.state / "pending" / (entry["id"] + ".json")).write_text(json.dumps(entry))
+
+    async def test_summary_of_a_day_of_uploads_and_limit_cards_is_one_post_by_job(self):
+        # Given: the 2026-11-23 day - 30 uploads into one folder on one owner message, 40 more parked as one
+        # card each by the owner-message write limit, and two refused writes.
+        self.approval()
+        now = dt.datetime.now(dt.timezone.utc)
+        proof = "https://discord.com/channels/10/77/1574347147820662897"
+        changes = [{"id": f"c{i}", "ts": (now - dt.timedelta(hours=4, seconds=-i)).isoformat(), "uid": 1004,
+                    "api": "drive", "op": "files.create", "method": "POST", "status": 200,
+                    "resource": {"id": f"file{i:02d}", "name": f"p{i:03d}.las"}, "owner_message": proof,
+                    "folders": [{"id": "fold1", "name": "Survey"}], "snapshot": None, "restorable": False}
+                   for i in range(30)]
+        pending = [{"id": f"p{i:02d}", "ts": (now - dt.timedelta(hours=3, seconds=-i)).isoformat(), "uid": 1004,
+                    "api": "drive", "op": "files.create", "reason": "owner-message-write-limit", "status": "pending",
+                    "owner_message": proof, "card": f"https://discord.com/channels/10/20/{900 + i}"}
+                   for i in range(40)]
+        denials = [{"ts": now.isoformat(), "uid": 1004, "port": "google", "method": "POST",
+                    "path": "/www.googleapis.com/upload/drive/v3/files", "reason": "owner-message-required"}] * 2
+        self.write_day(changes, pending, denials)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            await asyncio.to_thread(summary.post_summary, self.config, 24)
+        # Then: one post, a line for the job and a line for its waiting cards, nothing per file.
+        self.assertEqual(len(self.cards), 1)
+        (message,) = self.cards
+        lines = self.cards[message].splitlines()
+        self.assertLessEqual(len(lines), 10)
+        self.assertEqual(lines[1], "- 드라이브 추가 30건 · 폴더 「Survey」 · p000.las 외 29건 · 근거 글 <#77> "
+                         + summary.source(proof).rsplit(" ", 1)[-1])
+        self.assertIn("막힌 쓰기 2건 · 승인 기다림 40건", lines)
+        self.assertTrue(lines[-2].startswith("- 승인 기다림 드라이브 추가 40건 · 근거 글당 쓰기 한도 · 근거 글 <#77>"))
+        self.assertNotIn("file07", self.cards[message])
+        # And: the one attachment keeps every file, folder, card and the owner message.
+        (attachment,) = self.attachments[message].values()
+        for i in range(30):
+            self.assertIn(f"p{i:03d}.las · 성공 · id file{i:02d}", attachment)
+        for entry in pending:
+            self.assertIn("카드 " + entry["card"], attachment)
+        self.assertIn("- 폴더 Survey (id fold1)", attachment)
+        self.assertIn("근거 글 " + proof, attachment)
+        self.assertEqual(output.getvalue().split()[:3], ["SUMMARY_POSTED", "1", "message"])
+
+    async def test_summary_of_hundreds_of_jobs_stays_one_post_under_the_limit(self):
+        self.approval()
+        now = dt.datetime.now(dt.timezone.utc).isoformat()
+        changes = [{"id": f"c{i}", "ts": now, "api": "calendar", "op": "events.insert", "status": 200,
+                    "resource": {"summary": "x" * 200}, "owner_message": f"https://discord.com/channels/10/{i}/{i}",
+                    "snapshot": None, "restorable": False} for i in range(300)]
+        self.write_day(changes)
+        with contextlib.redirect_stdout(io.StringIO()):
+            await asyncio.to_thread(summary.post_summary, self.config, 24)
+        (content,) = self.cards.values()
+        self.assertLess(len(content), 2000)
+        self.assertIn("- 외 295묶음 295건", content)
+        (attachment,) = [text for files in self.attachments.values() for text in files.values()]
+        self.assertEqual(attachment.count("근거 글 https://discord.com/channels/10/"), 300)
+
+    async def test_a_drive_upload_journals_its_file_name_and_folder(self):
+        # A Dori asking fields=id gets only the id back; the journal still names the file and its folder.
+        meta = json.dumps({"name": "survey.las", "parents": ["fold1"]})
+        raw = (f"--b0\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{meta}\r\n"
+               f"--b0\r\nContent-Type: application/octet-stream\r\n\r\n").encode() + b"points" + b"\r\n--b0--\r\n"
+        status, _ = await self.request(path="/www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id",
+                                       raw=raw, headers={"content-type": "multipart/related; boundary=b0"})
+        self.assertEqual(status, 200)
+        row = json.loads((self.state / "changes.jsonl").read_text().splitlines()[-1])
+        self.assertEqual((row["resource"]["name"], row["folders"]), ("survey.las", [{"id": "fold1", "name": "Before"}]))
 
     async def test_vault_path_rejects_traversal_hidden_and_other_prefixes(self):
         self.config["vault"] = {"dir": str(self.state / "vault.git"), "allowed_prefix": "Notes"}
